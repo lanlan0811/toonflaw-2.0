@@ -5,6 +5,7 @@ import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 
 import { workflowStepSchema, WorkflowStep, getWorkflowStepTargetApi } from "@/constants/workflow";
+import { getLatestWorkflowStepRun, validateWorkflowContext } from "./utils";
 
 const router = express.Router();
 
@@ -64,10 +65,6 @@ function isRunnableState(state: ItemState, compulsory: boolean, retryFailedOnly:
   return compulsory || state === "pending" || state === "failed";
 }
 
-async function getProject(projectId: number) {
-  return await u.db("o_project").where("id", projectId).select("id", "imageModel", "imageQuality", "videoModel", "mode").first();
-}
-
 async function getScripts(projectId: number, scriptId?: number | null) {
   const query = u.db("o_script").where("projectId", projectId);
   if (scriptId) query.where("id", scriptId);
@@ -107,7 +104,10 @@ async function getStoryboards(projectId: number, scriptId?: number | null) {
 async function getTracks(projectId: number, scriptId?: number | null) {
   const query = u.db("o_videoTrack").where("projectId", projectId);
   if (scriptId) query.where("scriptId", scriptId);
-  return (await query.select("id", "scriptId", "prompt", "state", "duration", "selectVideoId")) as (TrackRow & { selectVideoId?: number | null })[];
+  return (await query.select("id", "scriptId", "prompt", "state", "duration", "videoId", "selectVideoId")) as (TrackRow & {
+    videoId?: number | null;
+    selectVideoId?: number | null;
+  })[];
 }
 
 type TrackSource = { id: number; sources: "storyboard" | "assets" };
@@ -205,12 +205,16 @@ export default router.post(
       audio?: boolean;
     };
     const requestedItemIds = itemIds ? new Set(itemIds) : null;
+    const invalidItemIds = itemIds?.filter((id) => !Number.isFinite(id) || id <= 0) ?? [];
 
+    if (invalidItemIds.length) return res.status(400).send(error("itemIds 必须是有效的正整数"));
     if (compulsory && retryFailedOnly) return res.status(400).send(error("强制重生成和仅重试失败项不能同时启用"));
 
     try {
-      const project = await getProject(projectId);
-      if (!project) return res.status(400).send(error("项目不存在"));
+      const { project, isStoryboardProject } = await validateWorkflowContext(projectId, scriptId);
+      if (isStoryboardProject && step === "extractOriginalAssets") {
+        return res.status(400).send(error("基于分镜表的项目在导入时已创建原始资产，不支持 extractOriginalAssets"));
+      }
 
       const scripts = await getScripts(projectId, scriptId);
       if (scriptId && !scripts.length) return res.status(400).send(error("剧本不存在或不属于当前项目"));
@@ -230,9 +234,26 @@ export default router.post(
 
       if (step === "generateDerivedAssets") {
         const realScriptId = scriptId ?? inferSingleScriptId(scripts, "项目包含多个剧本，生成衍生资产需要明确指定 scriptId");
-        const scriptDerivedAssets = scriptId ? derivedAssets : await getAssets(projectId, realScriptId).then((items) => items.filter((item) => !!item.assetsId));
-        const runnable = retryFailedOnly ? 0 : compulsory || !scriptDerivedAssets.length ? 1 : 0;
-        return res.status(200).send(success({ step, targetApi, requestBody: { projectId, scriptId: realScriptId }, total: runnable }));
+        const batchStoryboards = await getStoryboards(projectId, realScriptId);
+        const batchStoryboardIds = batchStoryboards.map((item) => item.id).filter((id): id is number => !!id);
+        const batchStoryboardIdSet = new Set(batchStoryboardIds);
+        const invalidStoryboardIds = itemIds?.filter((id) => !batchStoryboardIdSet.has(id)) ?? [];
+        if (invalidStoryboardIds.length) {
+          return res.status(400).send(error(`分镜不属于当前项目和剧本批次：${[...new Set(invalidStoryboardIds)].join(", ")}`));
+        }
+        const storyboardIds = requestedItemIds ? batchStoryboardIds.filter((id) => requestedItemIds.has(id)) : batchStoryboardIds;
+        const latestRun = await getLatestWorkflowStepRun(projectId, realScriptId, step);
+        const runnable = storyboardIds.length > 0 && latestRun?.state !== "running" && (
+          retryFailedOnly ? latestRun?.state === "failed" : compulsory || !latestRun || latestRun.state === "failed"
+        );
+        return res.status(200).send(
+          success({
+            step,
+            targetApi,
+            requestBody: { projectId, scriptId: realScriptId, storyboardIds },
+            total: runnable ? 1 : 0,
+          }),
+        );
       }
 
       if (step === "polishOriginalAssetPrompts" || step === "polishDerivedAssetPrompts") {
@@ -270,7 +291,7 @@ export default router.post(
         const scriptAssets = scriptId ? derivedAssets : await getAssets(projectId, realScriptId).then((items) => items.filter((item) => !!item.assetsId));
         const assetIds = scriptAssets
           .filter((item) => !requestedItemIds || (item.id != null && requestedItemIds.has(item.id)))
-          .filter((item) => item.prompt && isRunnableState(getImageStatus(item.imageState), compulsory, retryFailedOnly))
+          .filter((item) => isRunnableState(getImageStatus(item.imageState), compulsory, retryFailedOnly))
           .map((item) => item.id)
           .filter((id): id is number => !!id);
         return res.status(200).send(success({ step, targetApi, requestBody: { assetIds, projectId, scriptId: realScriptId, concurrentCount }, total: assetIds.length }));
@@ -313,7 +334,8 @@ export default router.post(
               const attempts = videos
                 .filter((video) => video.videoTrackId === track.id)
                 .sort((a, b) => Number(b.time ?? b.id ?? 0) - Number(a.time ?? a.id ?? 0));
-              const representative = attempts.find((video) => video.id === track.selectVideoId) ?? attempts.find((video) => getImageStatus(video.state) === "success") ?? attempts[0];
+              const selectedVideoId = track.selectVideoId ?? track.videoId;
+              const representative = attempts.find((video) => video.id === selectedVideoId) ?? attempts[0];
               return isRunnableState(getImageStatus(representative?.state), compulsory, retryFailedOnly);
             })
             .map((track) => track.id),

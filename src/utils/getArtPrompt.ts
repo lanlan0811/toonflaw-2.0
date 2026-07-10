@@ -6,9 +6,10 @@ import getPath from "./getPath";
  * 传入一个指定路径参数（风格名称），以及一个指定文件名，递归获取该文件并返回其内容
  * @param styleName - 风格目录名，例如 "chinese_sweet_romance"
  * @param fileName  - 目标文件名（不含 .md 后缀），例如 "art_character"、"prefix"
+ * @param requireTarget - 为 true 时目标文件缺失则返回空字符串，不回退到 prefix.md
  * @returns 文件内容字符串，未找到时返回空字符串
  */
-export function getArtPrompt(styleName: string, source: string, fileName: string): string {
+export function getArtPrompt(styleName: string, source: string, fileName: string, requireTarget = false): string {
   const baseDir = getPath(["skills", source, styleName]);
 
   if (!fs.existsSync(baseDir)) {
@@ -23,7 +24,7 @@ export function getArtPrompt(styleName: string, source: string, fileName: string
   const found = findFileRecursive(baseDir, target);
 
   if (!found) {
-    return prefixContent;
+    return requireTarget ? "" : prefixContent;
   }
 
   const fileContent = fs.readFileSync(found, "utf-8");

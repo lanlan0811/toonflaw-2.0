@@ -45,13 +45,14 @@ export default router.post(
     audio: z.boolean().optional(),
   }),
   async (req, res) => {
+    let prepared: PreparedStep | null = null;
     try {
       const baseUrl = getBaseUrl(req);
       const headers = getAuthHeaders(req);
       const prepareUrl = getInternalUrl(baseUrl, "/api/production/workflow/prepareStepRequest", req);
       const prepareRes = await axios.post(prepareUrl, req.body, { headers });
-      const prepared = prepareRes.data?.data as PreparedStep | undefined;
-      if (!prepared) return res.status(400).send(error("流程步骤请求体准备失败"));
+      prepared = (prepareRes.data?.data as PreparedStep | undefined) ?? null;
+      if (!prepared) return res.status(400).send(error("流程步骤请求体准备失败", { prepared: null }));
       if (!prepared.total) {
         return res.status(200).send(
           success({
@@ -72,7 +73,10 @@ export default router.post(
         }),
       );
     } catch (e) {
-      return res.status(400).send(error(u.error(e).message));
+      const responseData = axios.isAxiosError(e) ? e.response?.data : undefined;
+      const responsePrepared = responseData?.data?.prepared ?? null;
+      const message = responseData?.message ?? u.error(e).message;
+      return res.status(400).send(error(message, { prepared: prepared ?? responsePrepared }));
     }
   },
 );

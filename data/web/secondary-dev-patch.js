@@ -14,12 +14,15 @@
     {key:'generateVideos',label:'视频',progressKey:'videos',description:'提交视频生成任务。'}
   ];
   const forceableStepKeys = ['generateOriginalAssetImages','generateDerivedAssets','generateDerivedAssetImages','generateStoryboardImages','generateVideos'];
+  const scriptRequiredStepKeys = ['generateDerivedAssets','polishDerivedAssetPrompts','generateDerivedAssetImages','generateStoryboardImages','generateVideoPrompts','generateVideos'];
   let stepConfigs = defaultStepConfigs.slice();
   let parsedRows = [];
   let parsedMeta = {};
+  let parsedAssetStats = {role:0,scene:0,tool:0,total:0};
   let selectedFile = null;
   let storyboardRows = [];
   let currentAssets = [];
+  let currentScripts = [];
   let selectedStoryboardIds = [];
   let editingStoryboard = null;
   let editingAsset = null;
@@ -29,6 +32,12 @@
   let apiRootPromise = null;
   let progressByTarget = {};
   let runningSteps = {};
+  let progressRequests = {};
+  let listRequest = null;
+  let parseRequests = {};
+  let commitRequests = {};
+  let contextEpoch = 0;
+  let newImportMode = false;
   let progressTimer = null;
   let listTimer = null;
 
@@ -104,19 +113,30 @@
     return null;
   }
   function clearProjectData(nextProjectId){
+    contextEpoch += 1;
     parsedRows = [];
     parsedMeta = {};
+    parsedAssetStats = {role:0,scene:0,tool:0,total:0};
     selectedFile = null;
     storyboardRows = [];
     currentAssets = [];
+    currentScripts = [];
     selectedStoryboardIds = [];
     editingStoryboard = null;
+    editingAsset = null;
     currentScriptId = null;
     progressByTarget = {};
+    runningSteps = {};
+    progressRequests = {};
+    listRequest = null;
+    parseRequests = {};
+    commitRequests = {};
     ['tf-sd-file','tf-sm-file'].forEach(function(id){ if ($(id)) $(id).value = ''; });
     ['tf-sd-script-id','tf-sm-script-id'].forEach(function(id){ if ($(id)) $(id).value = ''; });
     ['tf-sd-preview','tf-sm-preview'].forEach(function(id){ if ($(id)) $(id).innerHTML = '<div class="tf-sd-help" style="padding:10px">暂无解析结果</div>'; });
+    ['tf-sd-asset-stats','tf-sm-asset-stats'].forEach(function(id){ if ($(id)) $(id).innerHTML = ''; });
     ['tf-sd-warnings','tf-sm-warnings'].forEach(function(id){ if ($(id)) $(id).innerHTML = ''; });
+    ['tf-sd-import-status','tf-sm-import-status','tf-sd-workflow-status','tf-sm-workflow-status'].forEach(function(id){ setStatus(id,''); });
     if ($('tf-sm-list')) $('tf-sm-list').innerHTML = '<div class="tf-sd-help" style="padding:10px">项目已变化，请重新加载分镜表</div>';
     if ($('tf-sm-assets')) $('tf-sm-assets').innerHTML = '<div class="tf-sd-help">项目已变化，请重新加载资产</div>';
     closeEditStoryboard();
@@ -128,7 +148,10 @@
     updateContextDisplay();
   }
   function setProjectContext(projectId){
-    if (currentProjectId && currentProjectId !== projectId) clearProjectData(projectId);
+    if (currentProjectId && currentProjectId !== projectId) {
+      newImportMode = false;
+      clearProjectData(projectId);
+    }
     else currentProjectId = projectId;
     ['tf-sd-project-id','tf-sm-project-id'].forEach(function(id){ if ($(id) && Number($(id).value) !== projectId) $(id).value = String(projectId); });
     updateContextDisplay();
@@ -144,14 +167,44 @@
     if(!value) throw new Error('请先选择或填写 projectId');
     return setProjectContext(value);
   }
-  function setCurrentScriptId(scriptId){
-    const value = Number(scriptId);
+  function clearBatchData(nextScriptId){
+    const value = Number(nextScriptId);
+    contextEpoch += 1;
     currentScriptId = value > 0 ? value : null;
+    storyboardRows = [];
+    currentAssets = [];
+    selectedStoryboardIds = [];
+    editingStoryboard = null;
+    editingAsset = null;
+    progressByTarget = {};
+    runningSteps = {};
+    progressRequests = {};
+    listRequest = null;
     ['tf-sd-script-id','tf-sm-script-id'].forEach(function(id){ if ($(id)) $(id).value = currentScriptId ? String(currentScriptId) : ''; });
+    if ($('tf-sm-list')) $('tf-sm-list').innerHTML = '<div class="tf-sd-help" style="padding:10px">批次已变化，正在加载分镜表...</div>';
+    if ($('tf-sm-assets')) $('tf-sm-assets').innerHTML = '<div class="tf-sd-help">批次已变化，正在加载资产...</div>';
+    setStatus('tf-sm-workflow-status','');
+    closeEditStoryboard();
+    closeEditAsset();
+    closeImagePreview();
+    renderSteps(null, 'page');
+    renderSteps(null);
     updateContextDisplay();
+  }
+  function setCurrentScriptId(scriptId, options){
+    const value = Number(scriptId);
+    const nextScriptId = value > 0 ? value : null;
+    const opts = options || {};
+    if (nextScriptId !== currentScriptId && opts.clear !== false) clearBatchData(nextScriptId);
+    else {
+      currentScriptId = nextScriptId;
+      ['tf-sd-script-id','tf-sm-script-id'].forEach(function(id){ if ($(id)) $(id).value = currentScriptId ? String(currentScriptId) : ''; });
+      updateContextDisplay();
+    }
     return currentScriptId;
   }
   function getScriptId(){
+    if (newImportMode) return null;
     const pageNode = $('tf-sm-script-id');
     const legacyNode = $('tf-sd-script-id');
     const primaryNode = isStoryboardRoute() ? pageNode : legacyNode;
@@ -164,16 +217,31 @@
     return currentScriptId;
   }
   function renderBatchOptions(scripts){
-    const select = $('tf-sm-script-id'); if(!select) return;
-    const current = getScriptId();
-    const options = ['<option value="">请选择分镜表批次</option>'].concat((scripts || []).map(function(script){
+    const select = $('tf-sm-script-id');
+    currentScripts = Array.isArray(scripts) ? scripts.slice() : [];
+    if(!select) return currentScriptId;
+    const availableIds = currentScripts.map(function(script){ return Number(script.id); }).filter(Boolean);
+    let selectedId = currentScriptId && availableIds.includes(Number(currentScriptId)) ? Number(currentScriptId) : null;
+    if (!selectedId && currentScripts.length === 1 && !newImportMode) selectedId = Number(currentScripts[0].id) || null;
+    const options = ['<option value="">'+(currentScripts.length > 1 ? '请选择分镜表批次（必选）' : '暂无分镜表批次')+'</option>'].concat(currentScripts.map(function(script){
       const count = Number(script.storyboardCount || 0);
       return '<option value="'+script.id+'">'+escapeHtml(script.name || ('分镜表批次 '+script.id))+' · '+count+' 条</option>';
     }));
     select.innerHTML = options.join('');
-    if (current) select.value = String(current);
+    if (selectedId !== currentScriptId) setCurrentScriptId(selectedId);
+    else {
+      ['tf-sd-script-id','tf-sm-script-id'].forEach(function(id){ if ($(id)) $(id).value = selectedId ? String(selectedId) : ''; });
+      updateContextDisplay();
+    }
+    return selectedId;
   }
-  function contextText(){ return '项目 '+(currentProjectId || '未选择')+' · 当前 scriptId/批次 '+(currentScriptId || '未选择'); }
+  function getBatchBlockReason(){
+    if (currentScriptId) return '';
+    if (currentScripts.length > 1) return '当前项目有多个分镜表批次，请先选择批次，避免跨批次执行。';
+    if (!currentScripts.length) return '当前项目还没有可用的分镜表批次，请先导入并提交分镜表。';
+    return '请先选择当前分镜表批次。';
+  }
+  function contextText(){ return '项目 '+(currentProjectId || '未选择')+' · '+(newImportMode ? '新建分镜表模式（不关联现有批次）' : '当前 scriptId/批次 '+(currentScriptId || '未选择')); }
   function updateContextDisplay(){
     ['tf-sd-context','tf-sm-context'].forEach(function(id){ const node=$(id); if(node) node.textContent=contextText(); });
   }
@@ -196,9 +264,10 @@
     if (scriptNode && !scriptNode.__tfContextBound) {
       scriptNode.__tfContextBound = true;
       scriptNode.addEventListener('change', function(){
+        newImportMode = false;
         setCurrentScriptId(scriptNode.value);
         if (scriptNode.id === 'tf-sm-script-id') {
-          refreshStoryboardList();
+          refreshStoryboardList({preserveBatch:true});
           refreshProgress('page');
         }
       });
@@ -213,7 +282,7 @@
       ['tf-sd-project-id','tf-sm-project-id'].forEach(function(id){ if ($(id)) $(id).value = String(pid); });
       setProjectContext(pid);
     }
-    if (sid && !currentScriptId) setCurrentScriptId(sid);
+    if (sid && !currentScriptId && !newImportMode) setCurrentScriptId(sid);
     else if (pid && currentProjectId === pid) updateContextDisplay();
   }
   function projectTypeLabel(type){ return type === 'storyboard' ? '基于分镜表' : type === 'novel' ? '基于小说原文' : '基于剧本'; }
@@ -250,9 +319,58 @@
     });
   }
 
+  function normalizeAssetStat(value){
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : 0;
+  }
+  function collectParsedAssetStats(rows, meta){
+    const associatedIds = new Set();
+    (rows || []).forEach(function(row){
+      (row.associateAssetsIds || []).forEach(function(id){ const value=Number(id); if(value>0) associatedIds.add(value); });
+    });
+    const metaStats = meta && meta.assetStats;
+    if (metaStats && typeof metaStats === 'object') {
+      const role = normalizeAssetStat(typeof metaStats.roles !== 'undefined' ? metaStats.roles : metaStats.role);
+      const scene = normalizeAssetStat(typeof metaStats.scenes !== 'undefined' ? metaStats.scenes : metaStats.scene);
+      const tool = normalizeAssetStat(typeof metaStats.tools !== 'undefined' ? metaStats.tools : metaStats.tool);
+      const total = normalizeAssetStat(metaStats.total) || role + scene + tool;
+      return {role:role,scene:scene,tool:tool,total:total,associated:associatedIds.size};
+    }
+    const roleNames = new Set();
+    const sceneNames = new Set();
+    const toolNames = new Set();
+    (meta && meta.roles || []).forEach(function(item){ if (item && item.name) roleNames.add(String(item.name).trim()); });
+    (meta && meta.scenes || []).forEach(function(item){ if (item && item.name) sceneNames.add(String(item.name).trim()); });
+    (rows || []).forEach(function(row){
+      (row.roleNames || []).forEach(function(name){ if (name) roleNames.add(String(name).trim()); });
+      (row.sceneNames || []).forEach(function(name){ if (name) sceneNames.add(String(name).trim()); });
+      (row.toolNames || []).forEach(function(name){ if (name) toolNames.add(String(name).trim()); });
+    });
+    const total = roleNames.size+sceneNames.size+toolNames.size;
+    return {role:roleNames.size,scene:sceneNames.size,tool:toolNames.size,total:total,associated:associatedIds.size};
+  }
+  function renderParsedAssetStats(prefix){
+    const box = $(prefix+'-asset-stats'); if(!box) return;
+    if (!parsedRows.length) { box.innerHTML = ''; return; }
+    const warning = parsedAssetStats.total === 0;
+    box.innerHTML = '<div class="tf-sm-parse-stats'+(warning?' warning':'')+'"><strong>解析资产统计</strong><span>角色 '+parsedAssetStats.role+'</span><span>场景 '+parsedAssetStats.scene+'</span><span>道具 '+parsedAssetStats.tool+'</span><span>合计 '+parsedAssetStats.total+'</span>'+(parsedAssetStats.associated?'<span>已有资产关联 '+parsedAssetStats.associated+'</span>':'')+'</div>'+(warning?'<div class="tf-sd-status warn tf-sm-block-warning">强警告：未解析到待创建的角色、场景或道具原始资产。纯文本分镜或已提供 associateAssetsIds 的数据仍可合法导入；提交前将再次请你确认。</div>':'');
+  }
+  function setImportBusy(prefix, kind, busy){
+    const button = $(prefix+'-'+kind+'-button');
+    if (!button) return;
+    button.disabled = !!busy;
+    button.textContent = busy ? (kind === 'parse' ? '正在解析...' : '正在提交...') : (kind === 'parse' ? '解析预览' : '确认导入分镜表');
+  }
   async function parseStoryboard(target){
+    const prefix = target === 'page' ? 'tf-sm' : 'tf-sd';
+    const requestKey = target === 'page' ? 'page' : 'legacy';
+    if (parseRequests[requestKey] || commitRequests[requestKey]) return;
+    const requestEpoch = contextEpoch;
+    const requestToken = {};
+    parseRequests[requestKey] = requestToken;
+    setImportBusy(prefix,'parse',true);
+    if ($(prefix+'-commit-button')) $(prefix+'-commit-button').disabled = true;
     try{
-      const prefix = target === 'page' ? 'tf-sm' : 'tf-sd';
       const filePayload = await readSelectedFile();
       const contentNode = $(prefix+'-import-content');
       const content = contentNode ? contentNode.value.trim() : '';
@@ -262,34 +380,64 @@
       const body = Object.assign({format:(formatNode && formatNode.value) || 'auto'}, filePayload);
       if (content && !body.base64) body.content = content;
       const res = await post('/api/storyboardImport/parse', body);
+      if (requestEpoch !== contextEpoch) return;
       parsedRows = (res.data && res.data.data) || [];
       parsedMeta = (res.data && res.data.meta) || {};
+      parsedAssetStats = collectParsedAssetStats(parsedRows, parsedMeta);
       renderPreview(parsedRows, prefix+'-preview');
       renderWarnings((res.data && res.data.warnings) || [], prefix+'-warnings');
-      setStatus(prefix+'-import-status','解析完成：'+parsedRows.length+' 条','ok');
-    }catch(e){ setStatus((target === 'page' ? 'tf-sm' : 'tf-sd')+'-import-status',e.message,'err'); }
+      renderParsedAssetStats(prefix);
+      if (!parsedRows.length) throw new Error('未解析到有效分镜数据');
+      if (!parsedAssetStats.total) setStatus(prefix+'-import-status','解析完成，但未发现待创建的原始资产。纯文本或已有资产关联仍可提交，请确认强警告。','warn');
+      else setStatus(prefix+'-import-status','解析完成：'+parsedRows.length+' 条；原始资产 '+parsedAssetStats.total+' 个（角色 '+parsedAssetStats.role+' / 场景 '+parsedAssetStats.scene+' / 道具 '+parsedAssetStats.tool+'）','ok');
+    }catch(e){ if (requestEpoch === contextEpoch) setStatus(prefix+'-import-status',e.message,'err'); }
+    finally {
+      if (parseRequests[requestKey] === requestToken) delete parseRequests[requestKey];
+      if (requestEpoch === contextEpoch) setImportBusy(prefix,'parse',false);
+      if (requestEpoch === contextEpoch) setImportBusy(prefix,'commit',false);
+    }
   }
 
   async function commitStoryboard(target){
     const prefix = target === 'page' ? 'tf-sm' : 'tf-sd';
+    const requestKey = target === 'page' ? 'page' : 'legacy';
+    if (commitRequests[requestKey] || parseRequests[requestKey]) return;
+    const requestEpoch = contextEpoch;
+    const requestToken = {};
+    commitRequests[requestKey] = requestToken;
+    if ($(prefix+'-parse-button')) $(prefix+'-parse-button').disabled = true;
+    setImportBusy(prefix,'commit',true);
     try{
       const projectId = getProjectId();
       if (!parsedRows.length) throw new Error('请先解析分镜表');
+      if (!parsedAssetStats.total && !window.confirm('强警告：本次导入未解析到待创建的角色、场景或道具原始资产。\n\n若这是合法纯文本分镜，或分镜已通过 associateAssetsIds 关联现有资产，可以继续提交。是否确认继续？')) {
+        setStatus(prefix+'-import-status','已取消提交；未解析到待创建的原始资产。','warn');
+        return;
+      }
       setStatus(prefix+'-import-status','正在提交入库...');
       const body = {projectId, data: parsedRows, meta: parsedMeta, options:{createScriptAssets:true,useReferenceAssetDescriptions:true,writeStoryboardIndex:true}};
-      const sid = getScriptId();
-      if (sid) body.scriptId = sid;
+      if (!newImportMode) {
+        const sid = getScriptId();
+        if (sid) body.scriptId = sid;
+      }
       const scriptNameNode = $(prefix+'-script-name');
       const scriptName = scriptNameNode && scriptNameNode.value ? scriptNameNode.value.trim() : '';
       if (scriptName) body.scriptName = scriptName;
       const res = await post('/api/storyboardImport/commit', body);
+      if (requestEpoch !== contextEpoch) return;
       const total = (res.data && res.data.total) || 0;
       const committedScriptId = res.data && res.data.scriptId;
-      if (committedScriptId) setCurrentScriptId(committedScriptId);
-      setStatus(prefix+'-import-status',statusWithContext('提交成功：'+total+' 条分镜已写入'),'ok');
-      await refreshStoryboardList();
+      newImportMode = false;
+      if (committedScriptId) setCurrentScriptId(committedScriptId, {clear:false});
+      setStatus(prefix+'-import-status',statusWithContext('已提交入库：'+total+' 条分镜。注意：提交不等于图片/视频生产完成，请继续查看下方流程进度。'),'ok');
+      await refreshStoryboardList({preserveBatch:true});
       await refreshProgress(target);
-    }catch(e){ setStatus(prefix+'-import-status',e.message,'err'); }
+    }catch(e){ if (requestEpoch === contextEpoch) setStatus(prefix+'-import-status',e.message,'err'); }
+    finally {
+      if (commitRequests[requestKey] === requestToken) delete commitRequests[requestKey];
+      if (requestEpoch === contextEpoch) setImportBusy(prefix,'parse',false);
+      if (requestEpoch === contextEpoch) setImportBusy(prefix,'commit',false);
+    }
   }
 
   async function loadConfig(target){
@@ -317,26 +465,75 @@
     return value || null;
   }
 
+  function progressCount(value, fallback){
+    return typeof value === 'number' && Number.isFinite(value) ? Math.max(0,value) : Math.max(0,Number(fallback || 0));
+  }
+  function getStepMetrics(progress, step, compulsory, retryFailedOnly){
+    const p = getStepProgress(progress, step) || {};
+    const total = progressCount(p.total, 0);
+    const completed = progressCount(p.success, typeof p.completed === 'boolean' ? (p.completed ? total : 0) : p.completed);
+    const hasPendingCount = typeof p.pending === 'number' && Number.isFinite(p.pending);
+    const pendingCount = hasPendingCount ? progressCount(p.pending,0) : 0;
+    let generating = progressCount(typeof p.generating === 'boolean' ? undefined : p.generating, p.generating === true ? Math.max(1,total-completed-pendingCount) : 0);
+    generating = Math.min(total || generating, generating);
+    let failed = progressCount(typeof p.failed === 'boolean' ? undefined : p.failed, 0);
+    if (p.failed === true && !failed) failed = Math.max(1,total-completed-pendingCount-generating);
+    failed = Math.min(total || failed, failed);
+    const pending = hasPendingCount ? pendingCount : Math.max(0,total-completed-failed-generating);
+    const forceable = forceableStepKeys.includes(step.key);
+    const serverRunnable = typeof p.runnable === 'boolean' ? p.runnable : progressCount(p.runnable,0) > 0;
+    let runnable = typeof p.runnable === 'number' ? progressCount(p.runnable,0) : (serverRunnable ? Math.max(1,pending+failed) : 0);
+    if (retryFailedOnly) runnable = failed;
+    else if (compulsory && forceable) runnable = Math.max(0,total-generating);
+    if (step.key === 'generateDerivedAssets') runnable = generating ? 0 : (retryFailedOnly ? failed : compulsory || serverRunnable || !total ? 1 : 0);
+    let blockReason = String(p.blockReason || '');
+    if (!getScriptId() && currentScripts.length > 1) blockReason = getBatchBlockReason();
+    else if (scriptRequiredStepKeys.includes(step.key) && !getScriptId()) blockReason = getBatchBlockReason();
+    else if (generating) blockReason = '已有任务生成中，请等待本步骤完成。';
+    else if (retryFailedOnly && !failed) blockReason = '当前没有失败项可重试。';
+    else if (compulsory && forceable && runnable) blockReason = '';
+    else if (!runnable && !blockReason) {
+      if (!total && step.key !== 'generateDerivedAssets') blockReason = '当前批次没有该步骤可处理的对象。';
+      else if (completed === total && total) blockReason = '全部对象已完成；如需重做，请启用“强制重生成”。';
+      else blockReason = '当前没有可执行对象。';
+    }
+    return {progress:p,total:total,completed:completed,failed:failed,generating:generating,pending:pending,runnable:Math.max(0,runnable),blockReason:blockReason};
+  }
+
+  function runningStepKey(step, target){
+    return [target === 'page' ? 'page' : 'legacy', currentProjectId || 'none', currentScriptId || 'all', step].join(':');
+  }
+
   function renderSteps(progress, target){
     const prefix = target === 'page' ? 'tf-sm' : 'tf-sd';
     const box = $(prefix+'-steps'); if(!box) return;
     const compulsory = !!(($(prefix+'-compulsory')||{}).checked);
+    const retryFailedOnly = !!(($(prefix+'-retry-failed-only')||{}).checked);
     box.innerHTML = '';
     stepConfigs.forEach(function(step){
-      const p = getStepProgress(progress, step);
-      const st = p && p.state || 'idle';
-      const count = p && typeof p.total !== 'undefined' ? ' · '+p.total : '';
-      const runningKey = step.key;
-      const generating = st === 'generating' || !!runningSteps[runningKey];
+      const metrics = getStepMetrics(progress, step, compulsory, retryFailedOnly);
+      const st = metrics.progress.state || 'idle';
+      const runningKey = runningStepKey(step.key, target);
+      const isRunning = !!runningSteps[runningKey];
+      const generating = st === 'generating' || metrics.generating > 0 || isRunning;
       const forceable = forceableStepKeys.includes(step.key);
-      const disabled = generating || (st === 'success' && !(compulsory && forceable));
-      const button = el('button',{class:'tf-sd-btn tf-sd-mini primary',text:generating?'执行中':'执行',on:{click:function(){ runStep(step.key, target); }}});
+      const disabled = generating || !!metrics.blockReason || (!metrics.runnable && !(compulsory && forceable));
+      const button = el('button',{class:'tf-sd-btn tf-sd-mini primary',text:generating?'执行中':'执行',title:metrics.blockReason || ('可执行 '+metrics.runnable+' 项'),on:{click:function(){ runStep(step.key, target); }}});
       button.disabled = disabled;
       if (disabled) button.setAttribute('aria-disabled','true');
-      const item = el('div',{class:'tf-sd-step'},[
+      const metricItems = [
+        'total '+metrics.total,
+        'completed '+metrics.completed,
+        'failed '+metrics.failed,
+        'generating '+metrics.generating,
+        'runnable '+metrics.runnable
+      ];
+      const item = el('div',{class:'tf-sd-step'+(metrics.blockReason?' blocked':'')},[
         el('div',{class:'tf-sd-step-main'},[
           el('div',{class:'tf-sd-step-name',text:step.label || step.key}),
-          el('div',{class:'tf-sd-step-desc',text:(step.description || '') + count})
+          el('div',{class:'tf-sd-step-desc',text:step.description || ''}),
+          el('div',{class:'tf-sd-step-metrics'},metricItems.map(function(text){ return el('span',{text:text}); })),
+          metrics.blockReason ? el('div',{class:'tf-sd-step-block',text:'blockReason：'+metrics.blockReason}) : el('span',{})
         ]),
         el('div',{class:'tf-sd-step-actions'},[
           el('span',{class:'tf-sd-chip '+st,text:stateLabels[st] || st}),
@@ -347,91 +544,174 @@
     });
   }
 
-  async function refreshProgress(target){
+  async function refreshProgress(target, options){
     const prefix = target === 'page' ? 'tf-sm' : 'tf-sd';
     const targetKey = target === 'page' ? 'page' : 'legacy';
-    try{
-      const projectId = getProjectId();
-      setStatus(prefix+'-workflow-status',statusWithContext('正在刷新流程状态...'));
-      const body = {projectId};
-      const sid = getScriptId(); if (sid) body.scriptId = sid;
-      const res = await post('/api/production/workflow/getProgress', body);
+    const opts = options || {};
+    let projectId;
+    try { projectId = getProjectId(); }
+    catch (e) { if (!opts.silent) setStatus(prefix+'-workflow-status',e.message,'err'); return null; }
+    const sid = getScriptId();
+    const requestKey = [targetKey,projectId,sid || 'all',contextEpoch].join(':');
+    if (progressRequests[requestKey]) return progressRequests[requestKey].promise;
+    const requestEpoch = contextEpoch;
+    const requestToken = {};
+    if (!opts.silent) setStatus(prefix+'-workflow-status',statusWithContext('正在读取流程状态...'));
+    const requestPromise = post('/api/production/workflow/getProgress', sid ? {projectId:projectId,scriptId:sid} : {projectId:projectId}).then(function(res){
+      if (requestEpoch !== contextEpoch || currentProjectId !== projectId || getScriptId() !== sid) return null;
       progressByTarget[targetKey] = res.data || null;
-      if (res.data && res.data.scriptId && !currentScriptId) setCurrentScriptId(res.data.scriptId);
+      if (res.data && res.data.scriptId && !currentScriptId && !newImportMode) setCurrentScriptId(res.data.scriptId, {clear:false});
       renderSteps(progressByTarget[targetKey], target);
-      setStatus(prefix+'-workflow-status',statusWithContext('状态已刷新：'+new Date().toLocaleTimeString()),'ok');
+      const statusNode = $(prefix+'-workflow-status');
+      if (!opts.silent && statusNode && statusNode.textContent.indexOf('正在读取流程状态...') === 0) setStatus(prefix+'-workflow-status','');
       return res.data;
-    }catch(e){ setStatus(prefix+'-workflow-status',statusWithContext(e.message),'err'); }
+    }).catch(function(e){
+      if (requestEpoch === contextEpoch) setStatus(prefix+'-workflow-status',statusWithContext(e.message),'err');
+      return null;
+    }).finally(function(){ if (progressRequests[requestKey] === requestToken) delete progressRequests[requestKey]; });
+    requestToken.promise = requestPromise;
+    progressRequests[requestKey] = requestToken;
+    return requestPromise;
   }
 
   async function runStep(step, target, options){
     const prefix = target === 'page' ? 'tf-sm' : 'tf-sd';
     const opts = options || {};
     const itemIds = Array.isArray(opts.itemIds) ? opts.itemIds.map(Number).filter(Boolean) : [];
-    const runningKey = step;
-    if (runningSteps[runningKey]) return;
-    runningSteps[runningKey] = true;
-    renderSteps(progressByTarget.page || null, 'page');
+    let projectId;
+    try { projectId = getProjectId(); }
+    catch (e) { setStatus(prefix+'-workflow-status',e.message,'err'); if (opts.throwOnError) throw e; return {ok:false,error:e}; }
+    const sid = getScriptId();
+    if ((!sid && currentScripts.length > 1) || (scriptRequiredStepKeys.includes(step) && !sid)) {
+      const error = new Error(getBatchBlockReason());
+      setStatus(prefix+'-workflow-status',statusWithContext(error.message),'err');
+      renderSteps(progressByTarget[target === 'page' ? 'page' : 'legacy'] || null, target);
+      if (opts.throwOnError) throw error;
+      return {ok:false,error:error};
+    }
+    const runningKey = [target === 'page' ? 'page' : 'legacy',projectId,sid || 'all',step].join(':');
+    if (runningSteps[runningKey]) return {ok:false,error:new Error('该步骤正在执行中')};
+    const requestEpoch = contextEpoch;
+    const requestContext = {epoch:requestEpoch,projectId:projectId,scriptId:sid};
+    const runToken = {};
+    function contextChanged(){ return requestContext.epoch !== contextEpoch || currentProjectId !== requestContext.projectId || getScriptId() !== requestContext.scriptId; }
+    runningSteps[runningKey] = runToken;
+    renderSteps(progressByTarget[target === 'page' ? 'page' : 'legacy'] || null, target);
     try{
-      const projectId = getProjectId();
       const body = {projectId, step};
-      const sid = getScriptId(); if (sid) body.scriptId = sid;
+      if (sid) body.scriptId = sid;
       body.concurrentCount = Number(($(prefix+'-concurrent-count')||{}).value || 5);
       body.groupSize = Number(($(prefix+'-group-size')||{}).value || 5);
       body.compulsory = typeof opts.compulsory === 'boolean' ? opts.compulsory : !!(($(prefix+'-compulsory')||{}).checked);
       body.audio = !!(($(prefix+'-audio')||{}).checked);
       body.retryFailedOnly = typeof opts.retryFailedOnly === 'boolean' ? opts.retryFailedOnly : !!(($(prefix+'-retry-failed-only')||{}).checked);
       if (itemIds.length) body.itemIds = itemIds;
-      setStatus(prefix+'-workflow-status',statusWithContext('正在执行：'+step+' ...'));
+      setStatus(prefix+'-workflow-status',statusWithContext('正在提交步骤：'+step+' ...'));
       const res = await post('/api/production/workflow/runStep', body);
+      if (contextChanged()) return {ok:false,aborted:true,error:new Error('上下文已切换，已终止后续操作')};
       const info = res.data || {};
-      setStatus(prefix+'-workflow-status',statusWithContext((info.status === 'skipped' ? '跳过：' : '已启动：') + (info.reason || step) + '\n可执行对象：' + ((info.prepared && info.prepared.total) || 0)),'ok');
-      await refreshStoryboardList();
-      await refreshProgress(target);
-    }catch(e){ setStatus(prefix+'-workflow-status',statusWithContext(e.message),'err'); }
+      const preparedTotal = Number(info.prepared && info.prepared.total || 0);
+      if (info.status === 'skipped') {
+        const error = new Error(info.reason || '没有可执行对象');
+        setStatus(prefix+'-workflow-status',statusWithContext('未启动：'+error.message+'；runnable '+preparedTotal),'warn');
+        return {ok:false,skipped:true,error:error,data:info};
+      }
+      setStatus(prefix+'-workflow-status',statusWithContext('已提交生产任务：'+step+'；runnable '+preparedTotal+'。提交不等于完成，请查看步骤统计。'),'ok');
+      await refreshStoryboardList({preserveBatch:true,silent:true});
+      if (contextChanged()) return {ok:false,aborted:true,error:new Error('上下文已切换，已终止后续操作')};
+      await refreshProgress(target, {silent:true});
+      return {ok:true,data:info};
+    }catch(e){
+      if (!contextChanged()) setStatus(prefix+'-workflow-status',statusWithContext(e.message),'err');
+      if (opts.throwOnError) throw e;
+      return {ok:false,error:e,aborted:contextChanged()};
+    }
     finally {
-      delete runningSteps[runningKey];
-      renderSteps(progressByTarget.page || null, 'page');
+      if (runningSteps[runningKey] === runToken) delete runningSteps[runningKey];
+      if (!contextChanged()) renderSteps(progressByTarget[target === 'page' ? 'page' : 'legacy'] || null, target);
     }
   }
 
-  async function refreshStoryboardList(){
+  async function refreshStoryboardList(options){
     const box = $('tf-sm-list');
-    if (!box) return;
-    try{
-      const projectId = getProjectId();
-      const keyword = (($('tf-sm-search')||{}).value || '').trim();
-      const sid = getScriptId();
-      box.innerHTML = '<div class="tf-sd-help" style="padding:12px">正在加载分镜表（'+escapeHtml(contextText())+'）...</div>';
-      const requestBody = {projectId, keyword, page:1, pageSize:200};
-      if (sid) requestBody.scriptId = sid;
-      const res = await post('/api/storyboardImport/list', requestBody);
+    if (!box) return null;
+    const opts = options || {};
+    let projectId;
+    try { projectId = getProjectId(); }
+    catch (e) { if (!opts.silent) box.innerHTML = '<div class="tf-sd-status err" style="padding:12px">'+escapeHtml(e.message)+'</div>'; return null; }
+    const keyword = (($('tf-sm-search')||{}).value || '').trim();
+    const sid = getScriptId();
+    const requestEpoch = contextEpoch;
+    const requestKey = [projectId,sid || 'all',keyword,requestEpoch].join(':');
+    if (listRequest && listRequest.key === requestKey) return listRequest.promise;
+    if (!opts.silent) box.innerHTML = '<div class="tf-sd-help" style="padding:12px">正在加载分镜表（'+escapeHtml(contextText())+'）...</div>';
+    const requestBody = {projectId, keyword, page:1, pageSize:200};
+    if (sid) requestBody.scriptId = sid;
+    const promise = post('/api/storyboardImport/list', requestBody).then(async function(res){
+      if (requestEpoch !== contextEpoch) return null;
       let rows = (res.data && res.data.data) || [];
-      if (sid) rows = rows.filter(function(row){ return Number(row.scriptId) === sid; });
       const assets = (res.data && res.data.assets) || [];
       const scripts = (res.data && res.data.scripts) || [];
-      renderBatchOptions(scripts);
+      const previousSid = sid;
+      const selectedSid = renderBatchOptions(scripts);
+      if (!previousSid && selectedSid && scripts.length === 1 && !opts.preserveBatch) {
+        const refreshed = await refreshStoryboardList({preserveBatch:true,silent:opts.silent});
+        if (currentScriptId === selectedSid) await refreshProgress('page', {silent:true});
+        return refreshed;
+      }
+      if (!selectedSid && scripts.length > 1) rows = [];
+      else if (selectedSid) rows = rows.filter(function(row){ return Number(row.scriptId) === selectedSid; });
+      const visibleAssets = !selectedSid && scripts.length > 1 ? [] : assets;
       storyboardRows = rows;
-      currentAssets = assets;
+      currentAssets = visibleAssets;
       selectedStoryboardIds = selectedStoryboardIds.filter(function(id){ return rows.some(function(row){ return row.id === id; }); });
       renderStoryboardList(rows);
-      renderAssets(assets);
-    }catch(e){ box.innerHTML = '<div class="tf-sd-status err" style="padding:12px">'+escapeHtml(e.message)+'</div>'; }
+      if (!selectedSid && scripts.length > 1) {
+        const assetBox = $('tf-sm-assets');
+        if (assetBox) assetBox.innerHTML = '<div class="tf-sm-batch-block"><strong>资产已隐藏</strong><div>'+escapeHtml(getBatchBlockReason())+'</div></div>';
+      } else renderAssets(visibleAssets);
+      renderSteps(progressByTarget.page || null, 'page');
+      return res.data;
+    }).catch(function(e){
+      if (requestEpoch === contextEpoch) box.innerHTML = '<div class="tf-sd-status err" style="padding:12px">'+escapeHtml(e.message)+'</div>';
+      return null;
+    }).finally(function(){ if (listRequest && listRequest.key === requestKey) listRequest = null; });
+    listRequest = {key:requestKey,promise:promise};
+    return promise;
+  }
+
+  function storyboardAssetMarkup(assets){
+    if (!(assets || []).length) return '<span class="tf-sd-help">无关联资产</span>';
+    return '<div class="tf-sm-story-assets">'+assets.map(function(relationAsset){
+      const fullAsset = currentAssets.find(function(item){ return Number(item.id) === Number(relationAsset.id); }) || relationAsset;
+      const derived = !!fullAsset.assetsId;
+      const typeLabel = {role:'角色',scene:'场景',tool:'道具'}[fullAsset.type] || fullAsset.type || '资产';
+      return '<span class="tf-sm-asset-badge '+(derived?'derived':'original')+'" title="'+(derived?'衍生资产':'原始资产')+'">'+escapeHtml(fullAsset.name || '')+' · '+escapeHtml(typeLabel)+' · '+(derived?'衍生':'原始')+'</span>';
+    }).join('')+'</div>';
   }
 
   function renderStoryboardList(rows){
     const box = $('tf-sm-list'); if(!box) return;
+    if (!getScriptId() && currentScripts.length > 1) { box.innerHTML = '<div class="tf-sm-batch-block"><strong>请选择分镜表批次</strong><div>'+escapeHtml(getBatchBlockReason())+'</div></div>'; return; }
     if(!rows.length){ box.innerHTML = '<div class="tf-sd-empty">暂无分镜表数据</div>'; return; }
     const allChecked = rows.length && rows.every(function(row){ return selectedStoryboardIds.includes(row.id); });
-    const toolbar = '<div class="tf-sm-table-actions"><button class="tf-sd-btn tf-sd-mini warn" data-action="bulk-delete">批量删除</button><span class="tf-sd-help">已选择 '+selectedStoryboardIds.length+' 条</span></div>';
-    const head = '<table class="tf-sd-table tf-sm-main-table"><thead><tr><th><input type="checkbox" data-action="toggle-all" '+(allChecked?'checked':'')+'></th><th>镜号</th><th>画面内容</th><th>时长</th><th>场景/轨道</th><th>资产</th><th>分镜图状态</th><th>操作</th></tr></thead><tbody>';
+    const toolbar = '<div class="tf-sm-table-actions"><button class="tf-sd-btn tf-sd-mini warn" data-action="bulk-delete" '+(!selectedStoryboardIds.length?'disabled':'')+'>批量删除</button><span class="tf-sd-help">已选择 '+selectedStoryboardIds.length+' 条</span></div>';
+    const head = '<table class="tf-sd-table tf-sm-main-table"><thead><tr><th><input type="checkbox" data-action="toggle-all" '+(allChecked?'checked':'')+'></th><th>缩略图</th><th>镜号 / 画面内容</th><th>时长</th><th>场景/轨道</th><th>关联资产</th><th>分镜图状态 / 原因</th><th>操作</th></tr></thead><tbody>';
     const body = rows.map(function(r,i){
       const shot = (r.videoDesc || '').match(/镜号[:：]\s*([^\n]+)/);
       const checked = selectedStoryboardIds.includes(r.id) ? 'checked' : '';
-      const failed = r.state === '生成失败' || r.state === '失败';
-      const success = r.state === '生成成功' || r.state === '已完成';
-      const retryButton = failed ? '<button class="tf-sd-btn tf-sd-mini primary" data-action="retry-image" data-id="'+r.id+'">重试分镜图</button>' : '';
-      return '<tr><td><input type="checkbox" data-action="toggle-one" data-id="'+r.id+'" '+checked+'></td><td>'+escapeHtml(r.index || (shot && shot[1]) || i+1)+'</td><td>'+escapeHtml(r.videoDesc || r.prompt || '')+'</td><td>'+escapeHtml(r.duration || '')+'</td><td>'+escapeHtml(r.track || '')+'</td><td>'+escapeHtml(((r.assets||[]).map(function(a){return a.name;}).join('、')))+'</td><td><span class="tf-sd-chip '+(failed?'failed':success?'success':'idle')+'">'+escapeHtml(r.state || '未生成')+'</span></td><td><div class="tf-sm-row-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit" data-id="'+r.id+'">编辑</button>'+retryButton+'<button class="tf-sd-btn tf-sd-mini warn" data-action="delete" data-id="'+r.id+'">删除</button></div></td></tr>';
+      const failed = isFailedState(r.state);
+      const success = isSuccessState(r.state);
+      const generating = isGeneratingState(r.state);
+      const src = String(r.src || '').trim();
+      const thumbnail = src ? '<button class="tf-sm-story-thumb" data-action="preview-storyboard" data-id="'+r.id+'" title="查看分镜图"><img src="'+escapeHtml(src)+'" alt="分镜 '+escapeHtml(r.index || i+1)+'" loading="lazy"></button>' : '<div class="tf-sm-story-thumb placeholder">暂无图片</div>';
+      const stateClass = failed?'failed':success?'success':generating?'generating':'idle';
+      const reason = r.reason ? '<div class="tf-sm-story-reason" title="'+escapeHtml(r.reason)+'">'+escapeHtml(r.reason)+'</div>' : '';
+      const generateImage = Number(r.shouldGenerateImage) !== 0;
+      const generateButton = generateImage && !success && !failed ? '<button class="tf-sd-btn tf-sd-mini primary" data-action="generate-image" data-id="'+r.id+'" '+(generating?'disabled':'')+'>'+(generating?'生成中':'生成分镜图')+'</button>' : '';
+      const retryButton = generateImage && failed ? '<button class="tf-sd-btn tf-sd-mini primary" data-action="retry-image" data-id="'+r.id+'">失败重试</button>' : '';
+      const forceButton = '<button class="tf-sd-btn tf-sd-mini warn" data-action="force-image" data-id="'+r.id+'" '+(generating?'disabled':'')+'>'+(generateImage?'强制重生':'强制生成')+'</button>';
+      return '<tr><td><input type="checkbox" data-action="toggle-one" data-id="'+r.id+'" '+checked+'></td><td>'+thumbnail+'</td><td><div class="tf-sm-shot-no">'+escapeHtml(r.index || (shot && shot[1]) || i+1)+'</div><div class="tf-sm-story-desc">'+escapeHtml(r.videoDesc || r.prompt || '')+'</div></td><td>'+escapeHtml(r.duration || '')+'</td><td>'+escapeHtml(r.track || '')+'</td><td>'+storyboardAssetMarkup(r.assets||[])+'</td><td><span class="tf-sd-chip '+stateClass+'">'+escapeHtml(r.state || '未生成')+'</span>'+reason+'</td><td><div class="tf-sm-row-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit" data-id="'+r.id+'">编辑关联</button>'+generateButton+retryButton+forceButton+'<button class="tf-sd-btn tf-sd-mini warn" data-action="delete" data-id="'+r.id+'">删除</button></div></td></tr>';
     }).join('');
     box.innerHTML = toolbar + head + body + '</tbody></table>';
     bindStoryboardListActions(box);
@@ -443,7 +723,13 @@
         const action = node.getAttribute('data-action');
         const id = Number(node.getAttribute('data-id'));
         if (action === 'edit') openEditStoryboard(id);
-        if (action === 'retry-image') runStep('generateStoryboardImages','page',{itemIds:[id]});
+        if (action === 'preview-storyboard') {
+          const row = storyboardRows.find(function(item){ return item.id === id; });
+          if (row) openImagePreview(row.src, '分镜 '+(row.index || row.id));
+        }
+        if (action === 'generate-image') runStep('generateStoryboardImages','page',{itemIds:[id],retryFailedOnly:false,compulsory:false});
+        if (action === 'retry-image') runStep('generateStoryboardImages','page',{itemIds:[id],retryFailedOnly:true,compulsory:false});
+        if (action === 'force-image') runStep('generateStoryboardImages','page',{itemIds:[id],retryFailedOnly:false,compulsory:true});
         if (action === 'delete') deleteStoryboards([id]);
         if (action === 'bulk-delete') deleteStoryboards(selectedStoryboardIds.slice());
       });
@@ -556,8 +842,9 @@
           const image = src ? '<button class="tf-sm-asset-thumb" data-action="preview-asset" data-id="'+asset.id+'" title="点击查看大图"><img src="'+escapeHtml(src)+'" alt="'+escapeHtml(asset.name || '资产图片')+'" loading="lazy"></button>' : '<div class="tf-sm-asset-thumb placeholder"><span>暂无图片</span></div>';
           const promptButtonText = promptGenerating ? '生成中' : promptFailed ? '重试提示词' : promptSuccess ? '重新生成提示词' : '生成提示词';
           const imageButtonText = imageGenerating ? '生成中' : imageFailed ? '重试图片' : imageSuccess ? '重新生成图片' : '生成图片';
-          const imageDisabled = imageGenerating || !asset.prompt;
-          return '<div class="tf-sm-asset-card">'+image+'<div class="tf-sm-asset-content"><div class="tf-sm-asset-title">'+escapeHtml(asset.name)+'</div><div class="tf-sm-asset-label">描述</div><div class="tf-sm-asset-desc">'+escapeHtml(asset.describe || '暂无描述')+'</div><div class="tf-sm-asset-label">提示词</div><div class="tf-sm-asset-prompt">'+escapeHtml(asset.prompt || '暂无提示词')+'</div><div class="tf-sm-asset-states"><span>提示词：'+escapeHtml(promptState)+'</span><span>图片：'+escapeHtml(imageState)+'</span></div>'+(asset.promptErrorReason?'<div class="tf-sd-status err">提示词：'+escapeHtml(asset.promptErrorReason)+'</div>':'')+(asset.imageErrorReason?'<div class="tf-sd-status err">图片：'+escapeHtml(asset.imageErrorReason)+'</div>':'')+'<div class="tf-sm-asset-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit-asset" data-id="'+asset.id+'">编辑</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-prompt" data-id="'+asset.id+'" '+(promptGenerating?'disabled':'')+'>'+promptButtonText+'</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-image" data-id="'+asset.id+'" '+(imageDisabled?'disabled':'')+'>'+imageButtonText+'</button></div></div></div>';
+          const imageDisabled = imageGenerating;
+          const imageHint = !asset.prompt ? '<div class="tf-sm-auto-prompt-note">暂无 prompt，点击生成图片时会自动生成。</div>' : '';
+          return '<div class="tf-sm-asset-card">'+image+'<div class="tf-sm-asset-content"><div class="tf-sm-asset-title">'+escapeHtml(asset.name)+'</div><div class="tf-sm-asset-label">描述</div><div class="tf-sm-asset-desc">'+escapeHtml(asset.describe || '暂无描述')+'</div><div class="tf-sm-asset-label">提示词</div><div class="tf-sm-asset-prompt">'+escapeHtml(asset.prompt || '暂无提示词')+'</div>'+imageHint+'<div class="tf-sm-asset-states"><span>提示词：'+escapeHtml(promptState)+'</span><span>图片：'+escapeHtml(imageState)+'</span></div>'+(asset.promptErrorReason?'<div class="tf-sd-status err">提示词：'+escapeHtml(asset.promptErrorReason)+'</div>':'')+(asset.imageErrorReason?'<div class="tf-sd-status err">图片：'+escapeHtml(asset.imageErrorReason)+'</div>':'')+'<div class="tf-sm-asset-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit-asset" data-id="'+asset.id+'">编辑</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-prompt" data-id="'+asset.id+'" '+(promptGenerating?'disabled':'')+'>'+promptButtonText+'</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-image" data-id="'+asset.id+'" '+(imageDisabled?'disabled':'')+' title="'+(!asset.prompt?'将先自动生成提示词，再生成图片':'生成资产图片')+'">'+imageButtonText+'</button></div></div></div>';
         }).join('')+'</div>';
       }).join('')+'</div>';
     }
@@ -575,11 +862,52 @@
     });
   }
 
-  function runAssetStep(asset, kind){
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  function assertRunContext(context){
+    if (context.epoch !== contextEpoch || currentProjectId !== context.projectId || getScriptId() !== context.scriptId) throw new Error('上下文已切换，已终止自动串联');
+  }
+  async function waitForAssetPrompt(assetId, context){
+    for (let attempt=0; attempt<30; attempt+=1) {
+      await delay(2000);
+      assertRunContext(context);
+      await refreshStoryboardList({preserveBatch:true,silent:true});
+      assertRunContext(context);
+      const latest = currentAssets.find(function(item){ return Number(item.id) === Number(assetId); });
+      if (latest && latest.prompt) return latest;
+      if (latest && isFailedState(latest.promptState)) throw new Error(latest.promptErrorReason || '资产提示词自动生成失败');
+    }
+    throw new Error('提示词仍在生成中，请稍后再次点击图片按钮');
+  }
+
+  async function runAssetStep(asset, kind){
     const derived = !!asset.assetsId;
     const step = kind === 'prompt' ? (derived ? 'polishDerivedAssetPrompts' : 'polishOriginalAssetPrompts') : (derived ? 'generateDerivedAssetImages' : 'generateOriginalAssetImages');
     const state = kind === 'prompt' ? (asset.promptState || (asset.prompt ? '已完成' : '未生成')) : (asset.imageState || (asset.src ? '已完成' : '未生成'));
-    runStep(step, 'page', {itemIds:[asset.id], retryFailedOnly:isFailedState(state), compulsory:isSuccessState(state)});
+    const runContext = {epoch:contextEpoch,projectId:currentProjectId,scriptId:getScriptId()};
+    const actionKey = ['asset',runContext.projectId || 'none',runContext.scriptId || 'all',asset.id,kind].join(':');
+    if (runningSteps[actionKey]) return;
+    const actionToken = {};
+    runningSteps[actionKey] = actionToken;
+    try {
+      assertRunContext(runContext);
+      let runnableAsset = asset;
+      if (kind === 'image' && !asset.prompt) {
+        setStatus('tf-sm-workflow-status',statusWithContext('资产“'+(asset.name || asset.id)+'”暂无 prompt，正在自动生成提示词；完成后将继续生成图片。'),'warn');
+        const promptResult = await runStep(derived ? 'polishDerivedAssetPrompts' : 'polishOriginalAssetPrompts', 'page', {itemIds:[asset.id],retryFailedOnly:isFailedState(asset.promptState),compulsory:false,throwOnError:true});
+        if (!promptResult.ok) throw promptResult.error || new Error('资产提示词自动生成未启动');
+        assertRunContext(runContext);
+        runnableAsset = await waitForAssetPrompt(asset.id, runContext);
+        assertRunContext(runContext);
+        setStatus('tf-sm-workflow-status',statusWithContext('提示词已生成，正在继续提交资产图片任务...'));
+      }
+      const latestState = kind === 'image' ? (runnableAsset.imageState || (runnableAsset.src ? '已完成' : '未生成')) : state;
+      const imageResult = await runStep(step, 'page', {itemIds:[asset.id], retryFailedOnly:isFailedState(latestState), compulsory:isSuccessState(latestState),throwOnError:true});
+      if (!imageResult.ok) throw imageResult.error || new Error('资产步骤未启动');
+    } catch (e) {
+      if (runContext.epoch === contextEpoch) setStatus('tf-sm-workflow-status',statusWithContext(e.message),'err');
+    } finally {
+      if (runningSteps[actionKey] === actionToken) delete runningSteps[actionKey];
+    }
   }
 
   function openEditAsset(id){
@@ -635,15 +963,19 @@
   }
 
   function startNewStoryboardImport(){
+    newImportMode = true;
     setCurrentScriptId(null);
     parsedRows = [];
     parsedMeta = {};
+    parsedAssetStats = {role:0,scene:0,tool:0,total:0};
     selectedFile = null;
     if ($('tf-sm-file')) $('tf-sm-file').value = '';
     if ($('tf-sm-script-name')) $('tf-sm-script-name').value = '';
     if ($('tf-sm-import-content')) $('tf-sm-import-content').value = '';
     renderPreview([], 'tf-sm-preview');
     renderWarnings([], 'tf-sm-warnings');
+    renderParsedAssetStats('tf-sm');
+    setImportBusy('tf-sm','commit',false);
     setStatus('tf-sm-import-status','已开始新建分镜表，请填写名称并导入内容。','ok');
     $('tf-sm-import-section').scrollIntoView({behavior:'smooth',block:'start'});
   }
@@ -667,9 +999,10 @@
         withFile ? field('分镜表内容','textarea',prefix+'-import-content','也可以直接粘贴 TXT 或 Markdown 内容') : el('span',{})
       ]),
       el('div',{class:'tf-sd-row'},[
-        el('button',{class:'tf-sd-btn primary',text:'解析预览',on:{click:function(){ parseStoryboard(prefix==='tf-sm'?'page':undefined); }}}),
-        el('button',{class:'tf-sd-btn warn',text:'确认导入分镜表',on:{click:function(){ commitStoryboard(prefix==='tf-sm'?'page':undefined); }}})
+        el('button',{id:prefix+'-parse-button',class:'tf-sd-btn primary',text:'解析预览',on:{click:function(){ parseStoryboard(prefix==='tf-sm'?'page':undefined); }}}),
+        el('button',{id:prefix+'-commit-button',class:'tf-sd-btn warn',text:'确认导入分镜表',on:{click:function(){ commitStoryboard(prefix==='tf-sm'?'page':undefined); }}})
       ]),
+      el('div',{id:prefix+'-asset-stats'}),
       el('div',{id:prefix+'-preview',class:'tf-sd-preview'},[el('div',{class:'tf-sd-help',style:'padding:10px',text:'暂无解析结果'})]),
       el('div',{id:prefix+'-warnings',class:'tf-sd-status warn'}),
       el('div',{id:prefix+'-import-status',class:'tf-sd-status'})
@@ -812,9 +1145,9 @@
     refreshStoryboardList();
     refreshProgress('page');
     if (listTimer) clearInterval(listTimer);
-    listTimer = setInterval(function(){ if(isStoryboardRoute()) refreshStoryboardList(); }, 15000);
+    listTimer = setInterval(function(){ if(isStoryboardRoute()) refreshStoryboardList({preserveBatch:true,silent:true}); }, 15000);
     if (progressTimer) clearInterval(progressTimer);
-    progressTimer = setInterval(function(){ if(isStoryboardRoute()) refreshProgress('page'); }, 5000);
+    progressTimer = setInterval(function(){ if(isStoryboardRoute()) refreshProgress('page',{silent:true}); }, 5000);
   }
 
   function hookHistory(){

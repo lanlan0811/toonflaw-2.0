@@ -27,6 +27,7 @@ export default router.post(
     await u.db("o_script").where("projectId", id).delete();
     // 删除项目下的任务
     await u.db("o_tasks").where("projectId", id).delete();
+    await u.db("o_workflowStepRun").where("projectId", id).delete();
     // 删除项目下的分镜
     const storyboardData = await u.db("o_storyboard").where("projectId", id).select("id");
     const storyboardIds = storyboardData.map((item: any) => item.id);

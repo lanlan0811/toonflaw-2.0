@@ -1005,6 +1005,23 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         ]);
       },
     },
+    //工作流步骤运行记录（用于独立步骤的可恢复状态）
+    {
+      name: "o_workflowStepRun",
+      builder: (table) => {
+        table.increments("id");
+        table.integer("projectId").notNullable();
+        table.integer("scriptId");
+        table.string("step").notNullable();
+        table.string("state").notNullable(); // running | success | empty | failed
+        table.integer("itemCount").defaultTo(0);
+        table.text("errorReason");
+        table.integer("startTime").notNullable();
+        table.integer("endTime");
+        table.integer("updateTime").notNullable();
+        table.index(["projectId", "scriptId", "step", "id"]);
+      },
+    },
     //记忆表（message=原始消息, summary=压缩摘要）
     {
       name: "memories",

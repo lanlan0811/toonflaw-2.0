@@ -31,6 +31,28 @@ export default async (knex: Knex): Promise<void> => {
       });
     }
   };
+
+  if (!(await knex.schema.hasTable("o_workflowStepRun"))) {
+    await knex.schema.createTable("o_workflowStepRun", (table) => {
+      table.increments("id");
+      table.integer("projectId").notNullable();
+      table.integer("scriptId");
+      table.string("step").notNullable();
+      table.string("state").notNullable();
+      table.integer("itemCount").defaultTo(0);
+      table.text("errorReason");
+      table.integer("startTime").notNullable();
+      table.integer("endTime");
+      table.integer("updateTime").notNullable();
+      table.index(["projectId", "scriptId", "step", "id"]);
+    });
+  }
+  await knex("o_workflowStepRun").where("state", "running").update({
+    state: "failed",
+    errorReason: "软件退出导致失败",
+    endTime: Date.now(),
+    updateTime: Date.now(),
+  });
   //矫正因软件异常退出导致的状态不一致问题
   await db("o_novel").where("eventState", 0).update({
     eventState: -1,
@@ -49,6 +71,10 @@ export default async (knex: Knex): Promise<void> => {
     errorReason: "软件退出导致失败",
   });
   await db("o_storyboard").where("state", "生成中").update({
+    state: "生成失败",
+    reason: "软件退出导致失败",
+  });
+  await db("o_videoTrack").where("state", "生成中").update({
     state: "生成失败",
     reason: "软件退出导致失败",
   });

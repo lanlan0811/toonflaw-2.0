@@ -4,13 +4,15 @@ import { z } from "zod";
 import u from "@/utils";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { createWorkflowStepRun, finishWorkflowStepRun, validateWorkflowContext } from "./utils";
 
 const router = express.Router();
-
+const workflowStep = "generateDerivedAssets" as const;
 const assetTypes = ["role", "scene", "tool"];
 
 const derivedAssetSuggestionSchema = z.object({
   parentAssetId: z.number().int().describe("父级原始资产 ID，必须来自输入的原始资产列表"),
+  storyboardIds: z.array(z.number().int()).min(1).describe("使用该衍生资产的分镜 ID，必须来自输入的当前分镜批次"),
   name: z.string().trim().min(1).describe("衍生资产名称"),
   describe: z.string().trim().min(1).describe("结合分镜上下文给出的衍生资产视觉描述"),
 });
@@ -46,21 +48,45 @@ function parseJsonResult(text: string): DerivedAssetResult {
   return result.data;
 }
 
+function uniqueNumbers(ids: number[]) {
+  return [...new Set(ids)];
+}
+
 export default router.post(
   "/",
   validateFields({
     projectId: z.number(),
     scriptId: z.number(),
+    storyboardIds: z.array(z.number().int().positive()).optional(),
   }),
   async (req, res) => {
-    const { projectId, scriptId } = req.body as { projectId: number; scriptId: number };
+    const { projectId, scriptId, storyboardIds: inputStoryboardIds } = req.body as {
+      projectId: number;
+      scriptId: number;
+      storyboardIds?: number[];
+    };
+    let stepRunId: number | undefined;
 
     try {
-      const project = await u.db("o_project").where("id", projectId).select("id", "name", "intro", "artStyle").first();
-      if (!project) return res.status(400).send(error("项目不存在"));
+      const { project, script } = await validateWorkflowContext(projectId, scriptId, true);
+      const batchStoryboards = await u
+        .db("o_storyboard")
+        .where({ projectId, scriptId })
+        .orderBy("index", "asc")
+        .select("id", "index", "track", "duration", "videoDesc", "prompt", "shouldGenerateImage");
+      const batchStoryboardIds = batchStoryboards.map((item) => item.id!).filter(Boolean);
+      const requestedStoryboardIds = inputStoryboardIds == null ? batchStoryboardIds : uniqueNumbers(inputStoryboardIds);
+      if (inputStoryboardIds && requestedStoryboardIds.length !== inputStoryboardIds.length) throw new Error("storyboardIds 不能包含重复 ID");
 
-      const script = await u.db("o_script").where({ id: scriptId, projectId }).select("id", "name", "content").first();
-      if (!script) return res.status(400).send(error("剧本不存在或不属于当前项目"));
+      const batchStoryboardIdSet = new Set(batchStoryboardIds);
+      const invalidStoryboardIds = requestedStoryboardIds.filter((id) => !batchStoryboardIdSet.has(id));
+      if (invalidStoryboardIds.length) {
+        throw new Error(`分镜不属于当前项目和剧本批次：${invalidStoryboardIds.join(", ")}`);
+      }
+      const requestedStoryboardIdSet = new Set(requestedStoryboardIds);
+      const storyboards = batchStoryboards.filter((item) => item.id && requestedStoryboardIdSet.has(item.id));
+
+      stepRunId = await createWorkflowStepRun(projectId, scriptId, workflowStep);
 
       const originalAssets = await u
         .db("o_assets")
@@ -70,19 +96,14 @@ export default router.post(
         .whereNull("o_assets.assetsId")
         .whereIn("o_assets.type", assetTypes)
         .distinct("o_assets.id", "o_assets.name", "o_assets.type", "o_assets.describe", "o_assets.prompt");
-      if (!originalAssets.length) return res.status(400).send(error("该剧本没有可用于生成衍生资产的原始资产"));
+      if (!originalAssets.length) throw new Error("该剧本没有可用于生成衍生资产的原始资产");
 
-      const storyboards = await u
-        .db("o_storyboard")
-        .where({ projectId, scriptId })
-        .orderBy("index", "asc")
-        .select("id", "index", "track", "duration", "videoDesc", "prompt", "shouldGenerateImage");
-      const storyboardIds = storyboards.map((item) => item.id!).filter(Boolean);
-      const storyboardAssetRows = storyboardIds.length
+      const storyboardAssetRows = requestedStoryboardIds.length
         ? await u
             .db("o_assets2Storyboard")
             .join("o_assets", "o_assets.id", "o_assets2Storyboard.assetId")
-            .whereIn("o_assets2Storyboard.storyboardId", storyboardIds)
+            .whereIn("o_assets2Storyboard.storyboardId", requestedStoryboardIds)
+            .where("o_assets.projectId", projectId)
             .select("o_assets2Storyboard.storyboardId", "o_assets.id as assetId", "o_assets.name", "o_assets.type")
         : [];
       const storyboardAssetMap = storyboardAssetRows.reduce<Record<number, { id: number; name: string | null; type: string | null }[]>>(
@@ -94,17 +115,16 @@ export default router.post(
         },
         {},
       );
-      const storyboardContext = storyboards.map((item) => ({
-        ...item,
-        assets: storyboardAssetMap[item.id!] ?? [],
-      }));
+      const storyboardContext = storyboards.map((item) => ({ ...item, assets: storyboardAssetMap[item.id!] ?? [] }));
 
       const originalAssetIds = originalAssets.map((item) => item.id!).filter(Boolean);
       const existingDerivedAssets = await u
         .db("o_assets")
-        .where("projectId", projectId)
-        .whereIn("assetsId", originalAssetIds)
-        .select("id", "assetsId", "name", "describe", "type");
+        .join("o_scriptAssets", "o_scriptAssets.assetId", "o_assets.id")
+        .where("o_assets.projectId", projectId)
+        .where("o_scriptAssets.scriptId", scriptId)
+        .whereIn("o_assets.assetsId", originalAssetIds)
+        .distinct("o_assets.id", "o_assets.assetsId", "o_assets.name", "o_assets.describe", "o_assets.type");
 
       let structuredResult: DerivedAssetResult | null = null;
       let toolCalled = false;
@@ -125,10 +145,10 @@ export default router.post(
           {
             role: "system",
             content: [
-              "你是影视制作中的衍生资产规划助手。请基于指定剧本的原始资产和分镜上下文，识别需要独立视觉形态的衍生资产。",
+              "你是影视制作中的衍生资产规划助手。请基于指定剧本的原始资产和当前分镜批次上下文，识别需要独立视觉形态的衍生资产。",
               "衍生资产是原始角色、场景或道具在特定服装、状态、时段、损坏程度或剧情阶段下的视觉变体。",
-              "每条建议必须引用输入中的父级原始资产 ID；不要把普通镜头、动作、情绪或摄影术语当作资产。",
-              "名称应简洁且能区分父资产，描述应包含足够的可视化差异。不要重复已有衍生资产。",
+              "每条建议必须引用输入中的父级原始资产 ID，并在 storyboardIds 中列出实际使用该变体的当前批次分镜 ID。",
+              "不要把普通镜头、动作、情绪或摄影术语当作资产。名称应简洁且能区分父资产，描述应包含足够的可视化差异。不要重复已有衍生资产。",
               "完成后必须调用 resultTool。没有必要新增时也必须调用，并返回 suggestions: []。",
             ].join("\n"),
           },
@@ -137,7 +157,8 @@ export default router.post(
             content: JSON.stringify(
               {
                 project: { id: project.id, name: project.name, intro: project.intro, artStyle: project.artStyle },
-                script: { id: script.id, name: script.name, content: script.content },
+                script: { id: script!.id, name: script!.name, content: script!.content },
+                storyboardIds: requestedStoryboardIds,
                 originalAssets,
                 existingDerivedAssets,
                 storyboards: storyboardContext,
@@ -153,15 +174,25 @@ export default router.post(
       if (!toolCalled || !structuredResult) structuredResult = parseJsonResult(aiResponse.text ?? "");
       const suggestions = (structuredResult as DerivedAssetResult).suggestions;
       const originalAssetMap = new Map(originalAssets.map((item) => [item.id!, item]));
-      const invalidParentIds = [...new Set(suggestions.map((item) => item.parentAssetId).filter((id) => !originalAssetMap.has(id)))];
-      if (invalidParentIds.length) {
-        return res.status(400).send(error(`AI 返回了不属于该剧本原始资产的父级 ID：${invalidParentIds.join(", ")}`));
+      const invalidParentIds = uniqueNumbers(suggestions.map((item) => item.parentAssetId).filter((id) => !originalAssetMap.has(id)));
+      if (invalidParentIds.length) throw new Error(`AI 返回了不属于该剧本原始资产的父级 ID：${invalidParentIds.join(", ")}`);
+
+      const invalidSuggestedStoryboardIds = uniqueNumbers(
+        suggestions.flatMap((item) => item.storyboardIds).filter((id) => !requestedStoryboardIdSet.has(id)),
+      );
+      if (invalidSuggestedStoryboardIds.length) {
+        throw new Error(`AI 返回了不属于当前分镜批次的 storyboardIds：${invalidSuggestedStoryboardIds.join(", ")}`);
       }
 
       const uniqueSuggestions = [
         ...new Map(
           suggestions.map((item) => {
-            const normalized = { ...item, name: item.name.trim(), describe: item.describe.trim() };
+            const normalized = {
+              ...item,
+              name: item.name.trim(),
+              describe: item.describe.trim(),
+              storyboardIds: uniqueNumbers(item.storyboardIds),
+            };
             return [`${normalized.parentAssetId}\u0000${normalized.name}`, normalized] as const;
           }),
         ).values(),
@@ -171,14 +202,16 @@ export default router.post(
         const existingRows = await trx("o_assets")
           .where("projectId", projectId)
           .whereIn("assetsId", originalAssetIds)
-          .select("id", "assetsId", "name");
-        const existingMap = new Map(existingRows.map((item) => [`${item.assetsId}\u0000${item.name ?? ""}`, item.id!]));
-        const result: { id: number; parentAssetId: number; name: string; created: boolean; updated: boolean }[] = [];
+          .select("id", "assetsId", "name", "describe");
+        const existingMap = new Map(existingRows.map((item) => [`${item.assetsId}\u0000${item.name ?? ""}`, item]));
+        const result: { id: number; parentAssetId: number; name: string; storyboardIds: number[]; created: boolean; updated: boolean }[] = [];
 
         for (const item of uniqueSuggestions) {
           const key = `${item.parentAssetId}\u0000${item.name}`;
-          let assetId = existingMap.get(key);
+          const existing = existingMap.get(key);
+          let assetId = existing?.id;
           let created = false;
+          let updated = false;
           if (!assetId) {
             const parent = originalAssetMap.get(item.parentAssetId)!;
             const [insertedId] = await trx("o_assets").insert({
@@ -190,38 +223,58 @@ export default router.post(
               startTime: Date.now(),
             });
             assetId = insertedId;
-            existingMap.set(key, assetId);
+            existingMap.set(key, { id: assetId, assetsId: item.parentAssetId, name: item.name, describe: item.describe });
             created = true;
-          } else {
+          } else if ((existing.describe ?? "") !== item.describe) {
             await trx("o_assets").where({ id: assetId, projectId }).update({
               describe: item.describe,
               prompt: null,
               promptState: null,
               promptErrorReason: null,
             });
+            updated = true;
           }
 
-          const relation = await trx("o_scriptAssets").where({ scriptId, assetId }).first();
-          if (!relation) await trx("o_scriptAssets").insert({ scriptId, assetId });
-          result.push({ id: assetId, parentAssetId: item.parentAssetId, name: item.name, created, updated: !created });
+          if (!(await trx("o_scriptAssets").where({ scriptId, assetId }).first())) {
+            await trx("o_scriptAssets").insert({ scriptId, assetId });
+          }
+          for (const storyboardId of item.storyboardIds) {
+            if (!(await trx("o_assets2Storyboard").where({ storyboardId, assetId }).first())) {
+              await trx("o_assets2Storyboard").insert({ storyboardId, assetId });
+            }
+          }
+          result.push({ id: assetId, parentAssetId: item.parentAssetId, name: item.name, storyboardIds: item.storyboardIds, created, updated });
         }
         return result;
       });
 
+      const runState = saved.length ? "success" : "empty";
+      await finishWorkflowStepRun(stepRunId, runState, saved.length);
       return res.status(200).send(
         success({
           projectId,
           scriptId,
+          storyboardIds: requestedStoryboardIds,
+          runId: stepRunId,
+          runState,
           suggested: uniqueSuggestions.length,
           created: saved.filter((item) => item.created).length,
           updated: saved.filter((item) => item.updated).length,
-          skipped: 0,
+          skipped: saved.filter((item) => !item.created && !item.updated).length,
           linked: saved.length,
           assets: saved,
         }),
       );
     } catch (e) {
-      return res.status(400).send(error(`生成衍生资产失败：${u.error(e).message}`));
+      const message = u.error(e).message;
+      if (stepRunId) {
+        try {
+          await finishWorkflowStepRun(stepRunId, "failed", 0, message);
+        } catch (updateError) {
+          console.error("衍生资产步骤失败状态写入失败", updateError);
+        }
+      }
+      return res.status(400).send(error(`生成衍生资产失败：${message}`));
     }
   },
 );

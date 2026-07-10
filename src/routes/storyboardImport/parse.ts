@@ -35,6 +35,13 @@ type MusicSpec = {
 
 type SubtitleSpec = Record<string, string>;
 
+type AssetStats = {
+  roles: number;
+  scenes: number;
+  tools: number;
+  total: number;
+};
+
 type ImportMeta = {
   project?: {
     productionSpec?: string;
@@ -45,6 +52,7 @@ type ImportMeta = {
   scenes?: SceneSpec[];
   music?: MusicSpec[];
   subtitle?: SubtitleSpec;
+  assetStats?: AssetStats;
 };
 
 type ImportRow = {
@@ -158,6 +166,39 @@ function splitList(value: unknown): string[] {
   ];
 }
 
+function splitContextList(value: unknown): string[] {
+  const text = cleanText(value);
+  if (!text) return [];
+  const result: string[] = [];
+  let current = "";
+  let depth = 0;
+  for (const char of text) {
+    if (char === "（" || char === "(" || char === "【" || char === "[") depth += 1;
+    if (char === "）" || char === ")" || char === "】" || char === "]") depth = Math.max(0, depth - 1);
+    if (depth === 0 && /[、,，|；;\n]/.test(char)) {
+      if (current.trim()) result.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) result.push(current.trim());
+  return unique(result);
+}
+
+function normalizeToolName(value: string): string {
+  const name = cleanText(value).replace(/^(?:道具|陈设)[：:]\s*/, "").replace(/\s*[（(【\[].*?[）)】\]]\s*$/u, "").trim();
+  return name || cleanText(value);
+}
+
+function pickKnownScenes(scene: string, scenes: SceneSpec[] = []): string[] {
+  if (!scene) return [];
+  const matched = scenes
+    .map((item) => cleanText(item.name))
+    .filter((name) => name && (scene.includes(name) || name.includes(scene)));
+  return matched.length ? unique(matched) : [scene];
+}
+
 function getAliasValue(record: Record<string, unknown>, key: keyof typeof headerAliases) {
   const alias = headerAliases[key].find((name) => record[name] != null && cleanText(record[name]) !== "");
   return alias ? record[alias] : undefined;
@@ -191,12 +232,12 @@ function unique(values: string[]): string[] {
 }
 
 function pickKnownRoles(text: string, roles: RoleSpec[] = []): string[] {
-  const roleNames = roles.map((item) => item.name).filter(Boolean);
-  const matched = roleNames.filter((name) => text.includes(name));
-  const speakers = [...text.matchAll(/([\u4e00-\u9fa5A-Za-z0-9_]{2,12})(?:[（(][^）)]*[）)])?[:：]/g)]
+  const roleNames = roles.map((item) => cleanText(item.name)).filter(Boolean);
+  if (roleNames.length) return unique(roleNames.filter((name) => text.includes(name)));
+  const speakers = [...text.matchAll(/(?:^|\n)([\u4e00-\u9fa5A-Za-z0-9_]{2,12})(?:[（(][^）)]*[）)])?[：:]/g)]
     .map((match) => match[1])
     .filter((name) => name && !["旁白", "画外音"].includes(name));
-  return unique([...matched, ...speakers]);
+  return unique(speakers);
 }
 
 function buildVideoDesc(record: StandardStoryboardRecord): string {
@@ -261,6 +302,7 @@ function normalizeStandardRow(record: StandardStoryboardRecord, index: number, m
   const sceneNames = splitList(record.sceneNames);
   const toolNames = splitList(record.toolNames);
   const roleText = [visualContent, dialogue, props].join("\n");
+  const parsedToolNames = splitContextList(props).map(normalizeToolName).filter(Boolean);
 
   const row: ImportRow = {
     shotNo: cleanText(record.shotNo ?? "") || undefined,
@@ -274,8 +316,8 @@ function normalizeStandardRow(record: StandardStoryboardRecord, index: number, m
     shouldGenerateImage: toShouldGenerateImage(record.shouldGenerateImage),
     associateAssetsIds: Array.isArray(record.associateAssetsIds) ? record.associateAssetsIds.map(Number).filter((id) => !Number.isNaN(id)) : [],
     roleNames: unique([...roleNames, ...pickKnownRoles(roleText, meta.roles)]),
-    sceneNames: unique([...sceneNames, scene]),
-    toolNames: unique([...toolNames, ...splitList(props)]),
+    sceneNames: unique([...sceneNames, ...pickKnownScenes(scene, meta.scenes)]),
+    toolNames: unique([...toolNames, ...parsedToolNames]),
     shotSize: cleanText(record.shotSize ?? "") || undefined,
     cameraMove: cleanText(record.cameraMove ?? "") || undefined,
     scene: scene || undefined,
@@ -365,7 +407,7 @@ function parseKeyValueBlocks(section: string, startField: string, fields: Record
   section.split(/\r?\n/).forEach((rawLine) => {
     const line = rawLine.trim();
     if (!line) return;
-    const match = line.match(/^([^：:]{1,16})[：:](.*)$/);
+    const match = line.match(/^([^：:]{1,24})[：:](.*)$/);
     const rawKey = match ? match[1].trim() : "";
     const rawValue = match ? match[2].trim() : "";
     const numberedStartField = rawKey.match(new RegExp(`^${startField}\\s*[一二三四五六七八九十百零〇0-9]+$`));
@@ -376,10 +418,14 @@ function parseKeyValueBlocks(section: string, startField: string, fields: Record
       currentKey = fieldKey;
       return;
     }
-    if (current && rawKey && fields[rawKey]) {
-      current[fields[rawKey]] = rawValue;
-      currentKey = fields[rawKey];
-      return;
+    if (current && rawKey) {
+      const normalizedKey = rawKey.replace(/^[一二三四五六七八九十百零〇0-9]+[.、]\s*/, "");
+      const fieldKey = fields[rawKey] ?? fields[normalizedKey];
+      if (fieldKey) {
+        current[fieldKey] = rawValue;
+        currentKey = fieldKey;
+        return;
+      }
     }
     if (current && currentKey) {
       current[currentKey] = `${current[currentKey] ?? ""}\n${line}`.trim();
@@ -423,7 +469,9 @@ function parseTxtStandard(content: string): ParsedImport {
     色调: "color",
     元素: "elements",
     氛围: "atmosphere",
-  }).map((item) => ({ name: item.name.replace(/^\d+[：:]/, ""), time: item.time, color: item.color, elements: item.elements, atmosphere: item.atmosphere }));
+  })
+    .map((item) => ({ name: cleanText(item.name), time: item.time, color: item.color, elements: item.elements, atmosphere: item.atmosphere }))
+    .filter((item) => item.name);
 
   meta.music = parseKeyValueBlocks(musicSection, "段落", {
     段落: "paragraph",
@@ -669,7 +717,18 @@ function mergeWarnings(parsed: ParsedImport): ParsedImport {
     if (durationIssue === "invalid") warnings.push(`第 ${index + 1} 条分镜时长异常，已使用默认 3 秒`);
     if (!row.visualContent && !row.videoDesc) warnings.push(`第 ${index + 1} 条分镜缺少画面内容`);
   });
-  return { ...parsed, warnings };
+
+  const roleNames = unique((parsed.meta.roles ?? []).map((item) => item.name));
+  const sceneNames = unique((parsed.meta.scenes ?? []).map((item) => item.name));
+  const toolNames = unique(parsed.data.flatMap((row) => row.toolNames));
+  const assetStats: AssetStats = {
+    roles: roleNames.length,
+    scenes: sceneNames.length,
+    tools: toolNames.length,
+    total: roleNames.length + sceneNames.length + toolNames.length,
+  };
+  if (assetStats.total === 0) warnings.push("阻断警告：未解析到任何原始资产（角色/场景/道具），请补充资产信息后再提交");
+  return { ...parsed, meta: { ...parsed.meta, assetStats }, warnings: unique(warnings) };
 }
 
 async function parseContent(params: { content?: string; base64?: string; format?: string; filename?: string; mimeType?: string }): Promise<ParsedImport> {

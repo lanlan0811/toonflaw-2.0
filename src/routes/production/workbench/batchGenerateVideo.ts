@@ -2,21 +2,18 @@ import express from "express";
 import u from "@/utils";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
-import { success } from "@/lib/responseFormat";
+import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { ReferenceList } from "@/utils/ai";
 const router = express.Router();
 
-type Type = "imageReference" | "startImage" | "endImage" | "videoReference" | "audioReference";
-interface UploadItem {
-  fileType: "image" | "video" | "audio";
-  type: Type;
-  sources?: "assets" | "storyboard";
-  id?: number;
-  src?: string;
-  label?: string;
-  prompt?: string;
-}
+type BatchTrack = {
+  uploadData: { id: number; sources: string }[];
+  trackId: number;
+  prompt: string;
+  duration: number;
+};
+type VideoTask = BatchTrack & { videoId: number; videoPath: string };
 
 export default router.post(
   "/",
@@ -42,100 +39,138 @@ export default router.post(
     audio: z.boolean().optional(),
   }),
   async (req, res) => {
-    const { scriptId, projectId, trackData, model, resolution, audio, mode } = req.body;
-
-    let modeData = [];
-    if (Array.isArray(mode)) {
-    } else if (typeof mode === "string" && mode.startsWith('["') && mode.endsWith('"]')) {
-      try {
-        modeData = JSON.parse(mode);
-      } catch (e) {}
-    }
-
-    // 获取生成视频比例
-    const ratio = await u.db("o_project").select("videoRatio").where("id", projectId).first();
-
-    // 先为每条轨道创建视频记录，确保后续任何预处理错误都有可更新的任务状态。
-    const tasks = await Promise.all(
-      (trackData as { uploadData: { id: number; sources: string }[]; trackId: number; prompt: string; duration: number }[]).map(async (track) => {
-        const videoPath = `/${projectId}/video/${uuidv4()}.mp4`;
-        const [videoId] = await u.db("o_video").insert({
-          filePath: videoPath,
-          time: Date.now(),
-          state: "生成中",
-          scriptId,
-          projectId,
-          videoTrackId: track.trackId,
-        });
-        return { ...track, videoId, videoPath };
-      }),
-    );
-
-    res.status(200).send(success(tasks.map((task) => ({ videoId: task.videoId, trackId: task.trackId }))));
-
-    const generateSingleVideo = async (task: (typeof tasks)[number]) => {
-      const { videoId, videoPath, prompt, duration, uploadData } = task;
-      try {
-        const images = await Promise.all(
-          uploadData.map(async (item) => {
-            if (item.sources === "storyboard") {
-              const storyboard = await u.db("o_storyboard").where({ id: item.id, projectId, scriptId }).select("filePath").first();
-              if (!storyboard?.filePath) throw new Error(`分镜 ${item.id} 没有可用图片`);
-              return { path: storyboard.filePath, sources: "storyBoard" };
-            }
-            if (item.sources === "assets") {
-              const asset = await u
-                .db("o_assets")
-                .where({ "o_assets.id": item.id, "o_assets.projectId": projectId })
-                .leftJoin("o_image", "o_assets.imageId", "o_image.id")
-                .select("o_image.filePath", "o_image.type")
-                .first();
-              if (!asset?.filePath) throw new Error(`资产 ${item.id} 没有可用图片`);
-              return { path: asset.filePath, sources: asset.type };
-            }
-            throw new Error(`不支持的参考资源类型：${item.sources}`);
-          }),
-        );
-        const references = await Promise.all(
-          images.map(async (item) => ({
-            base64: await u.oss.getImageBase64(item.path),
-            type: item.sources === "audio" ? "audio" : "image",
-          })),
-        );
-        const relatedObjects = { projectId, videoId, scriptId, type: "视频" };
-        const aiVideo = u.Ai.Video(model);
-        await aiVideo.run(
-          {
-            prompt,
-            referenceList: references as ReferenceList[],
-            mode: modeData.length > 0 ? modeData : mode,
-            duration,
-            aspectRatio: (ratio?.videoRatio as "16:9" | "9:16") || "16:9",
-            resolution,
-            audio,
-          },
-          {
-            projectId,
-            taskClass: "视频生成",
-            describe: "根据提示词生成视频",
-            relatedObjects: JSON.stringify(relatedObjects),
-          },
-        );
-        await aiVideo.save(videoPath);
-        await u.db("o_video").where("id", videoId).update({ state: "生成成功", errorReason: null });
-      } catch (taskError) {
-        const errorReason = u.error(taskError).message;
-        try {
-          await u.db("o_video").where("id", videoId).update({ state: "生成失败", errorReason });
-        } catch (updateError) {
-          console.error(`视频任务 ${videoId} 失败状态写入失败`, updateError);
-        }
-      }
+    const { scriptId, projectId, trackData, model, resolution, audio, mode } = req.body as {
+      scriptId: number;
+      projectId: number;
+      trackData: BatchTrack[];
+      model: `${string}:${string}`;
+      resolution: string;
+      audio?: boolean;
+      mode: string;
     };
 
-    // 后台并发执行，并显式兜底整个 Promise 链，避免未处理拒绝。
-    void Promise.all(tasks.map(generateSingleVideo)).catch((taskError) => {
-      console.error("批量视频后台任务执行失败", taskError);
-    });
+    try {
+      let modeData: string[] = [];
+      if (mode.startsWith('["') && mode.endsWith('"]')) {
+        try {
+          const parsed = JSON.parse(mode);
+          if (Array.isArray(parsed)) modeData = parsed;
+        } catch {}
+      }
+
+      const ratio = await u.db("o_project").select("videoRatio").where("id", projectId).first();
+      if (!ratio) throw new Error("项目不存在");
+      const requestedTrackIds = [...new Set(trackData.map((track) => track.trackId))];
+      const validTracks = requestedTrackIds.length
+        ? await u.db("o_videoTrack").where({ projectId, scriptId }).whereIn("id", requestedTrackIds).select("id", "state", "prompt")
+        : [];
+      const validTrackIds = new Set(validTracks.map((track) => track.id));
+      const validTrackMap = new Map(validTracks.map((track) => [track.id, track]));
+      const invalidTrackIds = requestedTrackIds.filter((trackId) => !validTrackIds.has(trackId));
+      if (invalidTrackIds.length) throw new Error(`视频轨道不存在或不属于当前项目和剧本：${invalidTrackIds.join(", ")}`);
+
+      const tasks = await u.db.transaction(async (trx) => {
+        const result: VideoTask[] = [];
+        for (const track of trackData) {
+          const videoPath = `/${projectId}/video/${uuidv4()}.mp4`;
+          const [videoId] = await trx("o_video").insert({
+            filePath: videoPath,
+            time: Date.now(),
+            state: "生成中",
+            errorReason: null,
+            scriptId,
+            projectId,
+            videoTrackId: track.trackId,
+          });
+          result.push({ ...track, videoId, videoPath });
+          const currentTrack = validTrackMap.get(track.trackId);
+          if (currentTrack?.prompt && currentTrack.state !== "生成中") {
+            await trx("o_videoTrack").where({ id: track.trackId, projectId, scriptId }).update({ state: "已完成", reason: null });
+          }
+        }
+        return result;
+      });
+
+      res.status(200).send(success(tasks.map((task) => ({ videoId: task.videoId, trackId: task.trackId }))));
+
+      const restoreTrackPromptState = async (task: VideoTask) => {
+        await u.db("o_videoTrack").where({ id: task.trackId, projectId, scriptId }).update({ state: "已完成", reason: null });
+      };
+      const generateSingleVideo = async (task: VideoTask) => {
+        const { videoId, videoPath, prompt, duration, uploadData } = task;
+        try {
+          const references = await Promise.all(
+            uploadData.map(async (item): Promise<ReferenceList> => {
+              if (item.sources === "storyboard") {
+                const storyboard = await u.db("o_storyboard").where({ id: item.id, projectId, scriptId }).select("filePath").first();
+                if (!storyboard?.filePath) throw new Error(`分镜 ${item.id} 没有可用图片`);
+                return { base64: await u.oss.getImageBase64(storyboard.filePath), type: "image" };
+              }
+              if (item.sources === "assets") {
+                const asset = await u
+                  .db("o_assets")
+                  .where({ "o_assets.id": item.id, "o_assets.projectId": projectId })
+                  .leftJoin("o_image", "o_assets.imageId", "o_image.id")
+                  .select("o_image.filePath", "o_assets.type")
+                  .first();
+                if (!asset?.filePath) throw new Error(`资产 ${item.id} 没有可用文件`);
+                return {
+                  base64: await u.oss.getImageBase64(asset.filePath),
+                  type: asset.type === "audio" ? "audio" : "image",
+                };
+              }
+              throw new Error(`不支持的参考资源类型：${item.sources}`);
+            }),
+          );
+          const relatedObjects = { projectId, videoId, scriptId, type: "视频" };
+          const aiVideo = u.Ai.Video(model);
+          await aiVideo.run(
+            {
+              prompt,
+              referenceList: references,
+              mode: (modeData.length > 0 ? modeData : mode) as any,
+              duration,
+              aspectRatio: (ratio.videoRatio as "16:9" | "9:16") || "16:9",
+              resolution,
+              audio,
+            },
+            {
+              projectId,
+              taskClass: "视频生成",
+              describe: "根据提示词生成视频",
+              relatedObjects: JSON.stringify(relatedObjects),
+            },
+          );
+          await aiVideo.save(videoPath);
+          const updated = await u.db("o_video").where({ id: videoId, projectId, scriptId, videoTrackId: task.trackId }).update({
+            state: "生成成功",
+            errorReason: null,
+          });
+          if (!updated) throw new Error(`视频任务 ${videoId} 不存在`);
+          await restoreTrackPromptState(task);
+        } catch (taskError) {
+          const errorReason = u.error(taskError).message;
+          try {
+            await u.db.transaction(async (trx) => {
+              const updated = await trx("o_video").where({ id: videoId, projectId, scriptId, videoTrackId: task.trackId }).update({
+                state: "生成失败",
+                errorReason,
+              });
+              if (!updated) throw new Error(`视频任务 ${videoId} 不存在，无法写入失败状态`);
+              await trx("o_videoTrack").where({ id: task.trackId, projectId, scriptId }).update({ state: "已完成", reason: null });
+            });
+          } catch (updateError) {
+            console.error(`视频任务 ${videoId} 失败状态写入失败`, updateError);
+          }
+        }
+      };
+
+      void Promise.all(tasks.map(generateSingleVideo)).catch((taskError) => {
+        console.error("批量视频后台任务执行失败", taskError);
+      });
+    } catch (e) {
+      if (!res.headersSent) return res.status(400).send(error(u.error(e).message));
+      console.error("批量视频任务启动失败", e);
+    }
   },
 );

@@ -71,7 +71,29 @@ function normalizeName(name: string) {
 }
 
 function uniqueNumbers(ids: number[]) {
-  return [...new Set(ids.filter((id) => Number.isFinite(id)))];
+  return [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+}
+
+function normalizeComparableText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+function extractShotNo(videoDesc: unknown): string {
+  return normalizeComparableText(videoDesc).match(/(?:^|\n)镜号[：:]\s*([^\n]+)/)?.[1]?.trim() ?? "";
+}
+
+function buildDuplicateKey(shotNo: unknown, index: unknown): string {
+  const normalizedShotNo = normalizeComparableText(shotNo);
+  if (normalizedShotNo) return `shot:${normalizedShotNo.toLowerCase()}`;
+  return Number.isInteger(index) && Number(index) > 0 ? `index:${Number(index)}` : "";
+}
+
+function buildImportIndex(item: StoryboardImportItem, rowIndex: number, options?: StoryboardImportOptions): number | undefined {
+  if (options?.writeStoryboardIndex === false) return undefined;
+  if (Number.isInteger(item.index) && Number(item.index) > 0) return Number(item.index);
+  return rowIndex + 1;
 }
 
 function normalizeStoryboardFilePath(src?: string | null): string {
@@ -81,7 +103,8 @@ function normalizeStoryboardFilePath(src?: string | null): string {
   if (/^[a-z][a-z\d+.-]*:/i.test(value) && !isHttpUrl) return "";
   if (isHttpUrl) {
     try {
-      if (!/^\/(?:oss|smallImage)\//.test(new URL(value).pathname)) return "";
+      const pathname = new URL(value).pathname;
+      if (!/^\/(?:oss|smallImage)\//.test(pathname) && !/\/[^/]+\.[A-Za-z0-9]{2,8}$/.test(pathname)) return "";
     } catch {
       return "";
     }
@@ -216,6 +239,21 @@ async function ensureScript(db: any, projectId: number, scriptId?: number | null
   return id;
 }
 
+async function validateAssociatedAssets(db: any, projectId: number, data: StoryboardImportItem[]) {
+  const rawIds = data.flatMap((item) => item.associateAssetsIds ?? []);
+  const invalidIds = [...new Set(rawIds.filter((id) => !Number.isInteger(id) || id <= 0))];
+  if (invalidIds.length) throw new Error(`关联资产 ID 无效：${invalidIds.join(", ")}`);
+  const requestedIds = uniqueNumbers(rawIds);
+  if (!requestedIds.length) return;
+
+  const assets = await db("o_assets").whereIn("id", requestedIds).select("id", "projectId");
+  const assetMap = new Map(assets.map((asset: { id: number; projectId?: number }) => [Number(asset.id), Number(asset.projectId)]));
+  const missingIds = requestedIds.filter((id) => !assetMap.has(id));
+  const crossProjectIds = requestedIds.filter((id) => assetMap.has(id) && assetMap.get(id) !== projectId);
+  if (missingIds.length) throw new Error(`关联资产不存在：${missingIds.join(", ")}`);
+  if (crossProjectIds.length) throw new Error(`关联资产不属于当前项目：${crossProjectIds.join(", ")}`);
+}
+
 async function insertMissingScriptAssets(db: any, scriptId: number, assetIds: number[]) {
   for (const assetId of uniqueNumbers(assetIds)) {
     const existing = await db("o_scriptAssets").where({ scriptId, assetId }).first();
@@ -272,34 +310,117 @@ export default router.post(
         if (normalizeProjectType(project.projectType ?? "") !== ProjectTypes.storyboard) throw new Error("仅基于分镜表的项目支持导入分镜表");
 
         const scriptId = await ensureScript(trx, projectId, req.body.scriptId, scriptName);
+        await validateAssociatedAssets(trx, projectId, data);
         const storyboardRows: { id: number; track: string; duration: number; associateAssetsIds: number[] }[] = [];
+        const warnings: string[] = [];
+        let inserted = 0;
+        let updated = 0;
+        let skipped = 0;
+
+        const existingStoryboards = await trx("o_storyboard").where({ scriptId, projectId }).orderBy("id");
+        const existingIds = existingStoryboards.map((item: { id?: number }) => Number(item.id)).filter((id: number) => Number.isInteger(id));
+        const existingRelations = existingIds.length ? await trx("o_assets2Storyboard").whereIn("storyboardId", existingIds).select("storyboardId", "assetId") : [];
+        const existingAssetIdsByStoryboard = (existingRelations as { storyboardId: number; assetId: number }[]).reduce((result, relation) => {
+          const ids = result.get(Number(relation.storyboardId)) ?? [];
+          ids.push(Number(relation.assetId));
+          result.set(Number(relation.storyboardId), ids);
+          return result;
+        }, new Map<number, number[]>());
+        const existingByShotNo = new Map<string, any>();
+        const existingByIndex = new Map<string, any>();
+        const existingShotNoCounts = new Map<string, number>();
+        const existingIndexCounts = new Map<string, number>();
+        existingStoryboards.forEach((item: any) => {
+          const existing = { ...item, associateAssetsIds: existingAssetIdsByStoryboard.get(Number(item.id)) ?? [] };
+          const shotKey = buildDuplicateKey(extractShotNo(item.videoDesc), undefined);
+          const indexKey = buildDuplicateKey(undefined, item.index);
+          if (shotKey) {
+            existingShotNoCounts.set(shotKey, (existingShotNoCounts.get(shotKey) ?? 0) + 1);
+            if (!existingByShotNo.has(shotKey)) existingByShotNo.set(shotKey, existing);
+          }
+          if (indexKey) {
+            existingIndexCounts.set(indexKey, (existingIndexCounts.get(indexKey) ?? 0) + 1);
+            if (!existingByIndex.has(indexKey)) existingByIndex.set(indexKey, existing);
+          }
+        });
+        const submittedKeys = new Set<string>();
 
         for (const [rowIndex, item] of data.entries()) {
+          const importIndex = buildImportIndex(item, rowIndex, options);
+          const duplicateKey = buildDuplicateKey(item.shotNo, options?.writeStoryboardIndex === false ? undefined : item.index);
+          const shotKey = buildDuplicateKey(item.shotNo, undefined);
+          const indexKey = buildDuplicateKey(undefined, options?.writeStoryboardIndex === false ? undefined : item.index);
+          if (duplicateKey && submittedKeys.has(duplicateKey)) {
+            skipped += 1;
+            warnings.push(`第 ${rowIndex + 1} 条分镜与本次提交中的镜号/序号重复，已跳过`);
+            continue;
+          }
+          if (duplicateKey) submittedKeys.add(duplicateKey);
+
           const associateAssetsIds = await ensureAssets(trx, projectId, item, meta, options);
           if (options?.createScriptAssets !== false) await insertMissingScriptAssets(trx, scriptId, associateAssetsIds);
           const videoDesc = item.shotNo && !item.videoDesc.includes("镜号：") ? `镜号：${item.shotNo}\n${item.videoDesc}` : item.videoDesc;
-          const filePath = normalizeStoryboardFilePath(item.src);
+          const importedFilePath = normalizeStoryboardFilePath(item.src);
+          const shotMatch = shotKey && existingShotNoCounts.get(shotKey) === 1 ? existingByShotNo.get(shotKey) : undefined;
+          const indexMatch = indexKey && existingIndexCounts.get(indexKey) === 1 ? existingByIndex.get(indexKey) : undefined;
+          const existing = shotKey ? shotMatch : indexMatch;
+          const filePath = existing && !importedFilePath ? normalizeComparableText(existing.filePath) : importedFilePath;
+          const preserveExistingImage = Boolean(existing?.filePath && !importedFilePath);
           const state = filePath ? "已完成" : "未生成";
-          const [id] = await trx("o_storyboard").insert({
-            prompt: item.prompt,
-            duration: String(item.duration),
-            state,
-            filePath,
-            scriptId,
-            projectId,
-            track: item.track,
-            videoDesc,
-            shouldGenerateImage: filePath ? 1 : item.shouldGenerateImage,
-            index: options?.writeStoryboardIndex === false ? undefined : item.index ?? rowIndex + 1,
-            createTime: Date.now(),
-          });
-          if (associateAssetsIds.length) {
-            await trx("o_assets2Storyboard").insert(
-              associateAssetsIds.map((assetId) => ({
-                assetId,
-                storyboardId: id,
-              })),
-            );
+          const shouldGenerateImage = preserveExistingImage ? Number(existing.shouldGenerateImage) : filePath ? 1 : item.shouldGenerateImage;
+          let id: number;
+
+          if (existing) {
+            id = Number(existing.id);
+            const nextShouldGenerateImage = shouldGenerateImage;
+            const nextState = state;
+            const unchanged =
+              normalizeComparableText(existing.prompt) === normalizeComparableText(item.prompt) &&
+              Number(existing.duration) === Number(item.duration) &&
+              normalizeComparableText(existing.track) === normalizeComparableText(item.track || "默认分组") &&
+              normalizeComparableText(existing.videoDesc) === normalizeComparableText(videoDesc) &&
+              normalizeComparableText(existing.state) === nextState &&
+              Number(existing.shouldGenerateImage) === Number(nextShouldGenerateImage) &&
+              normalizeComparableText(existing.filePath) === filePath &&
+              uniqueNumbers((existing.associateAssetsIds ?? []).map(Number)).sort((a, b) => a - b).join(",") === uniqueNumbers(associateAssetsIds).sort((a, b) => a - b).join(",");
+            if (unchanged) {
+              skipped += 1;
+              warnings.push(`第 ${rowIndex + 1} 条分镜已存在且内容未变化，已跳过`);
+            } else {
+              await trx("o_storyboard").where({ id, scriptId, projectId }).update({
+                prompt: item.prompt,
+                duration: String(item.duration),
+                state,
+                filePath,
+                track: item.track,
+                videoDesc,
+                shouldGenerateImage,
+                index: importIndex,
+              });
+              await trx("o_assets2Storyboard").where("storyboardId", id).delete();
+              if (associateAssetsIds.length) {
+                await trx("o_assets2Storyboard").insert(associateAssetsIds.map((assetId) => ({ assetId, storyboardId: id })));
+              }
+              updated += 1;
+            }
+          } else {
+            [id] = await trx("o_storyboard").insert({
+              prompt: item.prompt,
+              duration: String(item.duration),
+              state,
+              filePath,
+              scriptId,
+              projectId,
+              track: item.track,
+              videoDesc,
+              shouldGenerateImage: filePath ? 1 : item.shouldGenerateImage,
+              index: importIndex,
+              createTime: Date.now(),
+            });
+            if (associateAssetsIds.length) {
+              await trx("o_assets2Storyboard").insert(associateAssetsIds.map((assetId) => ({ assetId, storyboardId: id })));
+            }
+            inserted += 1;
           }
           storyboardRows.push({ id, track: item.track, duration: item.duration, associateAssetsIds });
         }
@@ -353,7 +474,7 @@ export default router.post(
           })),
         );
 
-        return { data: mapped, total: mapped.length, scriptId };
+        return { data: mapped, total: mapped.length, scriptId, inserted, updated, skipped, warnings };
       });
 
       res.status(200).send(success(result));

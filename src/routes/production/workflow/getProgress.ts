@@ -4,6 +4,8 @@ import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 
+import { validateWorkflowContext } from "./utils";
+
 const router = express.Router();
 
 type WorkflowState = "idle" | "ready" | "generating" | "success" | "failed" | "partial";
@@ -66,6 +68,24 @@ function countByState<T>(list: T[], stateGetter: (item: T) => ItemState) {
   );
 }
 
+function withCompatibility<T extends { state: WorkflowState; total: number }>(step: T, runnable: boolean, blockReason: string | null = null) {
+  return {
+    ...step,
+    runnable,
+    blockReason: runnable ? null : blockReason,
+    completed: step.state === "success",
+    generating: step.state === "generating",
+    failed: step.state === "failed" || step.state === "partial",
+  };
+}
+
+function getRunState(state?: string | null): WorkflowState {
+  if (state === "running") return "generating";
+  if (state === "success" || state === "empty") return "success";
+  if (state === "failed") return "failed";
+  return "idle";
+}
+
 export default router.post(
   "/",
   validateFields({
@@ -74,19 +94,22 @@ export default router.post(
   }),
   async (req, res) => {
     const { projectId, scriptId } = req.body as { projectId: number; scriptId?: number | null };
-    const project = await u.db("o_project").where("id", projectId).first();
-    if (!project) return res.status(400).send(error("项目不存在"));
+    try {
+      const { project, isStoryboardProject } = await validateWorkflowContext(projectId, scriptId);
 
-    const scriptQuery = u.db("o_script").where("projectId", projectId);
+      const scriptQuery = u.db("o_script").where("projectId", projectId);
     if (scriptId) scriptQuery.where("id", scriptId);
     const scripts = await scriptQuery.select("id", "extractState", "errorReason");
     if (scriptId && !scripts.length) return res.status(400).send(error("剧本不存在或不属于当前项目"));
 
-    const [novelTotalRow, novelPendingRow, eventSuccessRow, eventFailedRow] = await Promise.all([
+    const [novelTotalRow, novelPendingRow, eventSuccessRow, eventFailedRow, latestDerivedRun] = await Promise.all([
       u.db("o_novel").where("projectId", projectId).count("id as total").first(),
       u.db("o_novel").where("projectId", projectId).where("eventState", 0).count("id as total").first(),
       u.db("o_novel").where("projectId", projectId).where("eventState", 1).count("id as total").first(),
       u.db("o_novel").where("projectId", projectId).where("eventState", -1).count("id as total").first(),
+      scriptId
+        ? u.db("o_workflowStepRun").where({ projectId, scriptId, step: "generateDerivedAssets" }).orderBy("id", "desc").first()
+        : Promise.resolve(undefined),
     ]);
 
     const assetQuery = u
@@ -135,7 +158,7 @@ export default router.post(
 
     const trackQuery = u.db("o_videoTrack").where("projectId", projectId);
     if (scriptId) trackQuery.where("scriptId", scriptId);
-    const tracks = await trackQuery.select("id", "state", "prompt", "selectVideoId");
+    const tracks = await trackQuery.select("id", "state", "prompt", "videoId", "selectVideoId");
     const trackIds = tracks.map((item) => item.id!).filter(Boolean);
     const videos = trackIds.length
       ? await u.db("o_video").whereIn("videoTrackId", trackIds).select("id", "state", "videoTrackId", "time")
@@ -145,7 +168,8 @@ export default router.post(
       const candidates = videos
         .filter((video) => video.videoTrackId === track.id)
         .sort((a, b) => Number(b.time ?? b.id ?? 0) - Number(a.time ?? a.id ?? 0));
-      return candidates.find((video) => video.id === track.selectVideoId) ?? candidates.find((video) => getVideoState(video.state) === "success") ?? candidates[0];
+      const selectedVideoId = track.selectVideoId ?? track.videoId;
+      return candidates.find((video) => video.id === selectedVideoId) ?? candidates[0];
     });
     const videoCounts = countByState(representativeVideos, (item) => getVideoState(item?.state));
 
@@ -154,84 +178,112 @@ export default router.post(
     const eventSuccess = Number((eventSuccessRow as { total?: number })?.total ?? 0);
     const eventFailed = Number((eventFailedRow as { total?: number })?.total ?? 0);
 
+    const hasOriginalAssets = originalAssets.length > 0;
+    const hasDerivedAssets = derivedAssets.length > 0;
+    const hasStoryboards = storyboards.length > 0;
+    const derivedRunState = getRunState(latestDerivedRun?.state);
+    const derivedState: WorkflowState = derivedRunState === "idle"
+      ? hasOriginalAssets && hasStoryboards
+        ? "ready"
+        : "idle"
+      : derivedRunState;
+    const derivedRunnable = !!scriptId && hasOriginalAssets && hasStoryboards && latestDerivedRun?.state !== "running";
+    const derivedBlockReason = !scriptId
+      ? "生成衍生资产需要明确指定 scriptId"
+      : !hasOriginalAssets
+        ? "当前批次没有原始资产"
+        : !hasStoryboards
+          ? "当前批次没有分镜"
+          : latestDerivedRun?.state === "running"
+            ? "衍生资产正在生成"
+            : null;
     const steps = {
-      importContent: {
+      importContent: withCompatibility({
         state: scripts.length || novelTotal || storyboards.length ? "success" : "idle",
         total: scripts.length + novelTotal + storyboards.length,
         scripts: scripts.length,
         novels: novelTotal,
         storyboards: storyboards.length,
-      },
-      novelEvents: {
+      }, false, "导入步骤不通过工作流运行接口执行"),
+      novelEvents: withCompatibility({
         state: getProgressState(novelTotal, novelPending, eventSuccess, eventFailed, 0),
         total: novelTotal,
         pending: novelPending,
         success: eventSuccess,
         failed: eventFailed,
-      },
-      originalAssets: {
+      }, novelTotal > 0 && novelPending + eventFailed > 0, novelTotal ? "没有待处理或失败的小说章节" : "项目没有小说章节"),
+      originalAssets: withCompatibility({
         state: originalAssetState,
         total: originalAssets.length,
         sourceScripts: scripts.length,
         extract: scriptExtractCounts,
-      },
-      originalAssetPrompts: {
+      }, !isStoryboardProject && scripts.some((item) => getExtractState(item.extractState) === "pending" || getExtractState(item.extractState) === "failed"), isStoryboardProject ? "基于分镜表的项目在导入时已创建原始资产" : scripts.length ? "没有可提取的剧本" : "项目没有剧本"),
+      originalAssetPrompts: withCompatibility({
         state: getProgressState(originalAssets.length, originalPromptCounts.pending, originalPromptCounts.success, originalPromptCounts.failed, originalPromptCounts.generating),
         total: originalAssets.length,
         ...originalPromptCounts,
-      },
-      originalAssetImages: {
+      }, hasOriginalAssets && originalPromptCounts.generating === 0 && originalPromptCounts.pending + originalPromptCounts.failed > 0, hasOriginalAssets ? "没有待处理或失败的原始资产提示词" : "当前批次没有原始资产"),
+      originalAssetImages: withCompatibility({
         state: getProgressState(originalAssets.length, originalImageCounts.pending, originalImageCounts.success, originalImageCounts.failed, originalImageCounts.generating),
         total: originalAssets.length,
         ...originalImageCounts,
-      },
-      derivedAssets: {
-        state: derivedAssets.length ? "success" : originalAssets.length ? "ready" : "idle",
+      }, hasOriginalAssets && originalPromptCounts.success > 0 && originalImageCounts.generating === 0 && originalImageCounts.pending + originalImageCounts.failed > 0, !hasOriginalAssets ? "当前批次没有原始资产" : !originalPromptCounts.success ? "没有已就绪的原始资产提示词" : "没有待处理或失败的原始资产图片"),
+      derivedAssets: withCompatibility({
+        state: derivedState,
         total: derivedAssets.length,
-      },
-      derivedAssetPrompts: {
+        runState: latestDerivedRun?.state ?? null,
+        runId: latestDerivedRun?.id ?? null,
+        runItemCount: latestDerivedRun?.itemCount ?? null,
+        errorReason: latestDerivedRun?.errorReason ?? null,
+        startTime: latestDerivedRun?.startTime ?? null,
+        endTime: latestDerivedRun?.endTime ?? null,
+      }, derivedRunnable, derivedBlockReason),
+      derivedAssetPrompts: withCompatibility({
         state: getProgressState(derivedAssets.length, derivedPromptCounts.pending, derivedPromptCounts.success, derivedPromptCounts.failed, derivedPromptCounts.generating),
         total: derivedAssets.length,
         ...derivedPromptCounts,
-      },
-      derivedAssetImages: {
+      }, hasDerivedAssets && derivedPromptCounts.generating === 0 && derivedPromptCounts.pending + derivedPromptCounts.failed > 0, hasDerivedAssets ? "没有待处理或失败的衍生资产提示词" : "当前批次没有衍生资产"),
+      derivedAssetImages: withCompatibility({
         state: getProgressState(derivedAssets.length, derivedImageCounts.pending, derivedImageCounts.success, derivedImageCounts.failed, derivedImageCounts.generating),
         total: derivedAssets.length,
         ...derivedImageCounts,
-      },
-      storyboardPanel: {
+      }, hasDerivedAssets && derivedImageCounts.generating === 0 && derivedImageCounts.pending + derivedImageCounts.failed > 0, hasDerivedAssets ? "没有待处理或失败的衍生资产图片" : "当前批次没有衍生资产"),
+      storyboardPanel: withCompatibility({
         state: storyboards.length ? "success" : scripts.length || derivedAssets.length ? "ready" : "idle",
         total: storyboards.length,
-      },
-      storyboardImages: {
+      }, false, storyboards.length ? "分镜面板已存在" : "分镜面板不通过工作流运行接口生成"),
+      storyboardImages: withCompatibility({
         state: getProgressState(imageStoryboards.length, storyboardImageCounts.pending, storyboardImageCounts.success, storyboardImageCounts.failed, storyboardImageCounts.generating),
         total: imageStoryboards.length,
         skipped: storyboards.length - imageStoryboards.length,
         ...storyboardImageCounts,
-      },
-      videoPrompts: {
+      }, imageStoryboards.length > 0 && storyboardImageCounts.generating === 0 && storyboardImageCounts.pending + storyboardImageCounts.failed > 0, imageStoryboards.length ? "没有待处理或失败的分镜图片" : "当前批次没有需要生成图片的分镜"),
+      videoPrompts: withCompatibility({
         state: getProgressState(tracks.length, videoPromptCounts.pending, videoPromptCounts.success, videoPromptCounts.failed, videoPromptCounts.generating),
         total: tracks.length,
         ...videoPromptCounts,
-      },
-      videos: {
+      }, tracks.length > 0 && videoPromptCounts.generating === 0 && videoPromptCounts.pending + videoPromptCounts.failed > 0, tracks.length ? "没有待处理或失败的视频提示词" : "当前批次没有视频轨道"),
+      videos: withCompatibility({
         state: getProgressState(tracks.length, videoCounts.pending, videoCounts.success, videoCounts.failed, videoCounts.generating),
         total: tracks.length,
         attempts: videos.length,
         ...videoCounts,
-      },
+      }, tracks.length > 0 && videoPromptCounts.success > 0 && videoCounts.generating === 0 && videoCounts.pending + videoCounts.failed > 0, !tracks.length ? "当前批次没有视频轨道" : !videoPromptCounts.success ? "没有已就绪的视频提示词" : "没有待处理或失败的视频"),
     };
 
-    return res.status(200).send(
-      success({
-        project: {
-          id: project.id,
-          name: project.name,
-          projectType: project.projectType,
-        },
-        scriptId: scriptId ?? null,
-        steps,
-      }),
-    );
+      return res.status(200).send(
+        success({
+          project: {
+            id: project.id,
+            name: project.name,
+            projectType: project.projectType,
+          },
+          scriptId: scriptId ?? null,
+          steps,
+        }),
+      );
+    } catch (e) {
+      return res.status(400).send(error(u.error(e).message));
+    }
   },
 );

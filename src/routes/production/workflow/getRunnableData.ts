@@ -4,6 +4,8 @@ import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 
+import { validateWorkflowContext } from "./utils";
+
 const router = express.Router();
 const runnableAssetTypes = ["role", "scene", "tool"];
 type ItemState = "pending" | "success" | "failed" | "generating";
@@ -44,8 +46,13 @@ export default router.post(
   }),
   async (req, res) => {
     const { projectId, scriptId } = req.body as { projectId: number; scriptId?: number | null };
-    const project = await u.db("o_project").where("id", projectId).select("id", "imageModel", "imageQuality", "videoModel", "mode").first();
-    if (!project) return res.status(400).send(error("项目不存在"));
+    let context: Awaited<ReturnType<typeof validateWorkflowContext>>;
+    try {
+      context = await validateWorkflowContext(projectId, scriptId);
+    } catch (e) {
+      return res.status(400).send(error(u.error(e).message));
+    }
+    const { project, isStoryboardProject } = context;
 
     const scriptsQuery = u.db("o_script").where("projectId", projectId);
     if (scriptId) scriptsQuery.where("id", scriptId);
@@ -102,12 +109,17 @@ export default router.post(
           .whereIn("o_assets.type", runnableAssetTypes)
           .select("o_scriptAssets.scriptId", "o_assets.assetsId")
       : [];
-    const derivableScriptIds = scripts
-      .filter((script) => {
-        const rows = relationRows.filter((item) => item.scriptId === script.id);
-        return rows.some((item) => !item.assetsId) && !rows.some((item) => !!item.assetsId);
-      })
-      .map((item) => item.id);
+    const latestDerivedRun = scriptId
+      ? await u.db("o_workflowStepRun").where({ projectId, scriptId, step: "generateDerivedAssets" }).orderBy("id", "desc").first()
+      : undefined;
+    const derivableScriptIds = isStoryboardProject && scriptId && latestDerivedRun?.state !== "running" && relationRows.some((item) => item.scriptId === scriptId && !item.assetsId)
+      ? [scriptId]
+      : scripts
+          .filter((script) => {
+            const rows = relationRows.filter((item) => item.scriptId === script.id);
+            return rows.some((item) => !item.assetsId) && latestDerivedRun?.state !== "running";
+          })
+          .map((item) => item.id);
 
     const storyboardQuery = u.db("o_storyboard").where("projectId", projectId);
     if (scriptId) storyboardQuery.where("scriptId", scriptId);
@@ -139,7 +151,7 @@ export default router.post(
 
     const trackQuery = u.db("o_videoTrack").where("projectId", projectId);
     if (scriptId) trackQuery.where("scriptId", scriptId);
-    const tracks = await trackQuery.select("id", "scriptId", "prompt", "state", "reason", "duration", "selectVideoId");
+    const tracks = await trackQuery.select("id", "scriptId", "prompt", "state", "reason", "duration", "videoId", "selectVideoId");
     const trackIds = tracks.map((item) => item.id!).filter(Boolean);
     const videos = trackIds.length
       ? await u.db("o_video").whereIn("videoTrackId", trackIds).select("id", "state", "videoTrackId", "errorReason", "time")
@@ -152,7 +164,8 @@ export default router.post(
 
     const trackItems = tracks.map((item) => {
       const attempts = (videoMap[item.id!] ?? []).sort((a, b) => Number(b.time ?? b.id ?? 0) - Number(a.time ?? a.id ?? 0));
-      const representative = attempts.find((video) => video.id === item.selectVideoId) ?? attempts.find((video) => getImageStatus(video.state) === "success") ?? attempts[0];
+      const selectedVideoId = item.selectVideoId ?? item.videoId;
+      const representative = attempts.find((video) => video.id === selectedVideoId) ?? attempts[0];
       return {
         id: item.id,
         scriptId: item.scriptId,
@@ -172,12 +185,12 @@ export default router.post(
         project,
         scripts,
         runnable: {
-          extractOriginalAssets: scripts.filter((item) => ![0, 1, 2].includes(item.extractState ?? -2)).map((item) => item.id),
+          extractOriginalAssets: isStoryboardProject ? [] : scripts.filter((item) => ![0, 1, 2].includes(item.extractState ?? -2)).map((item) => item.id),
           polishOriginalAssetPrompts: originalAssets.filter((item) => ["pending", "failed"].includes(getPromptStatus(item.promptState, item.prompt))).map(mapAsset),
           generateOriginalAssetImages: originalAssets.filter((item) => item.prompt && ["pending", "failed"].includes(getImageStatus(item.imageState))).map(mapAsset),
           generateDerivedAssets: derivableScriptIds,
           polishDerivedAssetPrompts: derivedAssets.filter((item) => ["pending", "failed"].includes(getPromptStatus(item.promptState, item.prompt))).map(mapAsset),
-          generateDerivedAssetImages: derivedAssets.filter((item) => item.prompt && ["pending", "failed"].includes(getImageStatus(item.imageState))).map(mapAsset),
+          generateDerivedAssetImages: derivedAssets.filter((item) => ["pending", "failed"].includes(getImageStatus(item.imageState))).map(mapAsset),
           generateStoryboardImages: storyboardItems.filter((item) => item.shouldGenerateImage !== 0 && ["pending", "failed"].includes(item.imageState)),
           generateVideoPrompts: trackItems.filter((item) => ["pending", "failed"].includes(item.promptState) && item.storyboardIds.length),
           generateVideos: trackItems.filter((item) => item.prompt && item.promptState === "success" && ["pending", "failed"].includes(item.videoState)),

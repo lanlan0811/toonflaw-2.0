@@ -31,6 +31,7 @@ export default router.post(
       await u.db("o_assets2Storyboard").whereIn("storyboardId", storyboardIds).delete();
     }
     await u.db("o_scriptAssets").whereIn("scriptId", ids).delete();
+    await u.db("o_workflowStepRun").whereIn("scriptId", ids).delete();
     await u.db("o_script").whereIn("id", ids).delete();
     await u.db("o_storyboard").whereIn("scriptId", ids).delete();
     await u.db("o_video").whereIn("scriptId", ids).delete();

@@ -14,7 +14,7 @@
     {key:'generateVideos',label:'视频',progressKey:'videos',description:'提交视频生成任务。'}
   ];
   const forceableStepKeys = ['generateOriginalAssetImages','generateDerivedAssets','generateDerivedAssetImages','generateStoryboardImages','generateVideos'];
-  const scriptRequiredStepKeys = ['generateDerivedAssets','polishDerivedAssetPrompts','generateDerivedAssetImages','generateStoryboardImages','generateVideoPrompts','generateVideos'];
+  const scriptRequiredStepKeys = defaultStepConfigs.map(function(step){ return step.key; });
   let stepConfigs = defaultStepConfigs.slice();
   let parsedRows = [];
   let parsedMeta = {};
@@ -842,9 +842,13 @@
           const image = src ? '<button class="tf-sm-asset-thumb" data-action="preview-asset" data-id="'+asset.id+'" title="点击查看大图"><img src="'+escapeHtml(src)+'" alt="'+escapeHtml(asset.name || '资产图片')+'" loading="lazy"></button>' : '<div class="tf-sm-asset-thumb placeholder"><span>暂无图片</span></div>';
           const promptButtonText = promptGenerating ? '生成中' : promptFailed ? '重试提示词' : promptSuccess ? '重新生成提示词' : '生成提示词';
           const imageButtonText = imageGenerating ? '生成中' : imageFailed ? '重试图片' : imageSuccess ? '重新生成图片' : '生成图片';
-          const imageDisabled = imageGenerating;
-          const imageHint = !asset.prompt ? '<div class="tf-sm-auto-prompt-note">暂无 prompt，点击生成图片时会自动生成。</div>' : '';
-          return '<div class="tf-sm-asset-card">'+image+'<div class="tf-sm-asset-content"><div class="tf-sm-asset-title">'+escapeHtml(asset.name)+'</div><div class="tf-sm-asset-label">描述</div><div class="tf-sm-asset-desc">'+escapeHtml(asset.describe || '暂无描述')+'</div><div class="tf-sm-asset-label">提示词</div><div class="tf-sm-asset-prompt">'+escapeHtml(asset.prompt || '暂无提示词')+'</div>'+imageHint+'<div class="tf-sm-asset-states"><span>提示词：'+escapeHtml(promptState)+'</span><span>图片：'+escapeHtml(imageState)+'</span></div>'+(asset.promptErrorReason?'<div class="tf-sd-status err">提示词：'+escapeHtml(asset.promptErrorReason)+'</div>':'')+(asset.imageErrorReason?'<div class="tf-sd-status err">图片：'+escapeHtml(asset.imageErrorReason)+'</div>':'')+'<div class="tf-sm-asset-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit-asset" data-id="'+asset.id+'">编辑</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-prompt" data-id="'+asset.id+'" '+(promptGenerating?'disabled':'')+'>'+promptButtonText+'</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-image" data-id="'+asset.id+'" '+(imageDisabled?'disabled':'')+' title="'+(!asset.prompt?'将先自动生成提示词，再生成图片':'生成资产图片')+'">'+imageButtonText+'</button></div></div></div>';
+          const imageDisabled = imageGenerating || (!asset.assetsId && !asset.prompt);
+          const imageHint = !asset.prompt
+            ? asset.assetsId
+              ? '<div class="tf-sm-auto-prompt-note">暂无 prompt，点击生成图片时会由图片任务自动生成。</div>'
+              : '<div class="tf-sm-auto-prompt-note">原始资产需要先生成或填写 prompt，才能生成图片。</div>'
+            : '';
+          return '<div class="tf-sm-asset-card">'+image+'<div class="tf-sm-asset-content"><div class="tf-sm-asset-title">'+escapeHtml(asset.name)+'</div><div class="tf-sm-asset-label">描述</div><div class="tf-sm-asset-desc">'+escapeHtml(asset.describe || '暂无描述')+'</div><div class="tf-sm-asset-label">提示词</div><div class="tf-sm-asset-prompt">'+escapeHtml(asset.prompt || '暂无提示词')+'</div>'+imageHint+'<div class="tf-sm-asset-states"><span>提示词：'+escapeHtml(promptState)+'</span><span>图片：'+escapeHtml(imageState)+'</span></div>'+(asset.promptErrorReason?'<div class="tf-sd-status err">提示词：'+escapeHtml(asset.promptErrorReason)+'</div>':'')+(asset.imageErrorReason?'<div class="tf-sd-status err">图片：'+escapeHtml(asset.imageErrorReason)+'</div>':'')+'<div class="tf-sm-asset-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit-asset" data-id="'+asset.id+'">编辑</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-prompt" data-id="'+asset.id+'" '+(promptGenerating?'disabled':'')+'>'+promptButtonText+'</button><button class="tf-sd-btn tf-sd-mini primary" data-action="asset-image" data-id="'+asset.id+'" '+(imageDisabled?'disabled':'')+' title="'+(!asset.prompt?(asset.assetsId?'将由图片任务自动生成提示词，再生成图片':'请先生成或填写原始资产提示词'):'生成资产图片')+'">'+imageButtonText+'</button></div></div></div>';
         }).join('')+'</div>';
       }).join('')+'</div>';
     }
@@ -862,21 +866,8 @@
     });
   }
 
-  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
   function assertRunContext(context){
     if (context.epoch !== contextEpoch || currentProjectId !== context.projectId || getScriptId() !== context.scriptId) throw new Error('上下文已切换，已终止自动串联');
-  }
-  async function waitForAssetPrompt(assetId, context){
-    for (let attempt=0; attempt<30; attempt+=1) {
-      await delay(2000);
-      assertRunContext(context);
-      await refreshStoryboardList({preserveBatch:true,silent:true});
-      assertRunContext(context);
-      const latest = currentAssets.find(function(item){ return Number(item.id) === Number(assetId); });
-      if (latest && latest.prompt) return latest;
-      if (latest && isFailedState(latest.promptState)) throw new Error(latest.promptErrorReason || '资产提示词自动生成失败');
-    }
-    throw new Error('提示词仍在生成中，请稍后再次点击图片按钮');
   }
 
   async function runAssetStep(asset, kind){
@@ -891,14 +882,8 @@
     try {
       assertRunContext(runContext);
       let runnableAsset = asset;
-      if (kind === 'image' && !asset.prompt) {
-        setStatus('tf-sm-workflow-status',statusWithContext('资产“'+(asset.name || asset.id)+'”暂无 prompt，正在自动生成提示词；完成后将继续生成图片。'),'warn');
-        const promptResult = await runStep(derived ? 'polishDerivedAssetPrompts' : 'polishOriginalAssetPrompts', 'page', {itemIds:[asset.id],retryFailedOnly:isFailedState(asset.promptState),compulsory:false,throwOnError:true});
-        if (!promptResult.ok) throw promptResult.error || new Error('资产提示词自动生成未启动');
-        assertRunContext(runContext);
-        runnableAsset = await waitForAssetPrompt(asset.id, runContext);
-        assertRunContext(runContext);
-        setStatus('tf-sm-workflow-status',statusWithContext('提示词已生成，正在继续提交资产图片任务...'));
+      if (kind === 'image' && !asset.prompt && derived) {
+        setStatus('tf-sm-workflow-status',statusWithContext('衍生资产“'+(asset.name || asset.id)+'”暂无 prompt，将由图片任务自动生成提示词并继续生成图片。'),'warn');
       }
       const latestState = kind === 'image' ? (runnableAsset.imageState || (runnableAsset.src ? '已完成' : '未生成')) : state;
       const imageResult = await runStep(step, 'page', {itemIds:[asset.id], retryFailedOnly:isFailedState(latestState), compulsory:isSuccessState(latestState),throwOnError:true});

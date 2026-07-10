@@ -7,7 +7,7 @@ import Module from "module";
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 
-const TARGET_ENTRIES = new Set(["assets", "models", "serve", "skills", "web", "vendor"]);
+const TARGET_ENTRIES = new Set(["assets", "modelPrompt", "models", "serve", "skills", "web", "vendor"]);
 
 function copyDir(src: string, dest: string): void {
   if (!fs.existsSync(src)) return;

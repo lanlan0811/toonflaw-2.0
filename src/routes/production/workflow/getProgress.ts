@@ -187,7 +187,11 @@ export default router.post(
         ? "ready"
         : "idle"
       : derivedRunState;
-    const derivedRunnable = !!scriptId && hasOriginalAssets && hasStoryboards && latestDerivedRun?.state !== "running";
+    const derivedRunnable =
+      !!scriptId &&
+      hasOriginalAssets &&
+      hasStoryboards &&
+      (!latestDerivedRun || latestDerivedRun.state === "failed");
     const derivedBlockReason = !scriptId
       ? "生成衍生资产需要明确指定 scriptId"
       : !hasOriginalAssets
@@ -196,7 +200,11 @@ export default router.post(
           ? "当前批次没有分镜"
           : latestDerivedRun?.state === "running"
             ? "衍生资产正在生成"
-            : null;
+            : latestDerivedRun?.state === "success"
+              ? "衍生资产已生成；如需重新分析，请启用强制重生成"
+              : latestDerivedRun?.state === "empty"
+                ? "本次分析没有需要创建的衍生资产；如需重新分析，请启用强制重生成"
+                : null;
     const steps = {
       importContent: withCompatibility({
         state: scripts.length || novelTotal || storyboards.length ? "success" : "idle",

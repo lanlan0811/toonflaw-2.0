@@ -46,18 +46,27 @@ export default router.post(
         });
 
         await trx("o_assets2Storyboard").where("storyboardId", id).delete();
-        const uniqueAssetIds = [...new Set(associateAssetsIds.filter((assetId) => Number.isFinite(assetId)))];
+        const uniqueAssetIds = [...new Set(associateAssetsIds.filter((assetId) => Number.isInteger(assetId) && assetId > 0))];
+        if (uniqueAssetIds.length !== associateAssetsIds.length) throw new Error("关联资产 ID 必须是有效的正整数");
         if (uniqueAssetIds.length) {
-          const validAssets = await trx("o_assets").where({ projectId }).whereIn("id", uniqueAssetIds).select("id");
+          const validAssets = await trx("o_assets")
+            .join("o_scriptAssets", "o_scriptAssets.assetId", "o_assets.id")
+            .where("o_assets.projectId", projectId)
+            .where("o_scriptAssets.scriptId", storyboard.scriptId)
+            .whereIn("o_assets.id", uniqueAssetIds)
+            .distinct("o_assets.id");
           const validAssetIds = validAssets.map((item: { id: number }) => item.id);
-          if (validAssetIds.length) {
-            await trx("o_assets2Storyboard").insert(
-              validAssetIds.map((assetId: number) => ({
-                storyboardId: id,
-                assetId,
-              })),
-            );
+          if (validAssetIds.length !== uniqueAssetIds.length) {
+            const validAssetIdSet = new Set(validAssetIds);
+            const invalidAssetIds = uniqueAssetIds.filter((assetId) => !validAssetIdSet.has(assetId));
+            throw new Error(`关联资产不属于当前项目和分镜表批次：${invalidAssetIds.join(", ")}`);
           }
+          await trx("o_assets2Storyboard").insert(
+            validAssetIds.map((assetId: number) => ({
+              storyboardId: id,
+              assetId,
+            })),
+          );
         }
 
         await recalculateStoryboardTracks(trx, projectId, [Number(storyboard.scriptId)]);

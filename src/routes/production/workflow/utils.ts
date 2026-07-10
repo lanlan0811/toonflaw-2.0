@@ -42,19 +42,26 @@ export async function getLatestWorkflowStepRun(projectId: number, scriptId: numb
 }
 
 export async function createWorkflowStepRun(projectId: number, scriptId: number | null, step: WorkflowStep) {
-  const now = Date.now();
-  const [id] = await u.db("o_workflowStepRun").insert({
-    projectId,
-    scriptId,
-    step,
-    state: "running",
-    itemCount: 0,
-    errorReason: null,
-    startTime: now,
-    endTime: null,
-    updateTime: now,
+  return await u.db.transaction(async (trx) => {
+    const query = trx("o_workflowStepRun").where({ projectId, step, state: "running" });
+    if (scriptId == null) query.whereNull("scriptId");
+    else query.where("scriptId", scriptId);
+    if (await query.first()) throw new Error("该工作流步骤正在执行，请勿重复提交");
+
+    const now = Date.now();
+    const [id] = await trx("o_workflowStepRun").insert({
+      projectId,
+      scriptId,
+      step,
+      state: "running",
+      itemCount: 0,
+      errorReason: null,
+      startTime: now,
+      endTime: null,
+      updateTime: now,
+    });
+    return id;
   });
-  return id;
 }
 
 export async function finishWorkflowStepRun(id: number, state: Exclude<WorkflowStepRunState, "running">, itemCount = 0, errorReason: string | null = null) {

@@ -92,9 +92,16 @@
     const headers = {'Content-Type':'application/json'};
     if (token) headers.authorization = token.startsWith('Bearer ') ? token : token;
     const root = await getApiRoot();
-    const res = await fetch(joinApiUrl(root, url), {method:'POST', headers, body: JSON.stringify(body || {})});
+    const requestUrl = joinApiUrl(root, url);
+    const res = await fetch(requestUrl, {method:'POST', headers, body: JSON.stringify(body || {})});
     const data = await res.json().catch(function(){ return null; });
-    if (!res.ok || (data && data.code && data.code !== 200)) throw new Error((data && (data.message || data.msg)) || ('请求失败：'+res.status));
+    if (!res.ok || (data && data.code && data.code !== 200)) {
+      const error = new Error((data && (data.message || data.msg)) || ('请求失败：'+res.status));
+      error.status = res.status;
+      error.data = data;
+      error.url = requestUrl;
+      throw error;
+    }
     return data;
   }
   function getQueryNumber(names){
@@ -622,7 +629,10 @@
       await refreshProgress(target, {silent:true});
       return {ok:true,data:info};
     }catch(e){
-      if (!contextChanged()) setStatus(prefix+'-workflow-status',statusWithContext(e.message),'err');
+      if (!contextChanged()) {
+        setStatus(prefix+'-workflow-status',statusWithContext(e.message),'err');
+        if (e.status === 409 || String(e.message || '').indexOf('正在执行') >= 0) await refreshProgress(target, {silent:true});
+      }
       if (opts.throwOnError) throw e;
       return {ok:false,error:e,aborted:contextChanged()};
     }

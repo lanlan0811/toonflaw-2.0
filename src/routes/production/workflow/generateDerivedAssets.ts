@@ -4,7 +4,7 @@ import { z } from "zod";
 import u from "@/utils";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
-import { createWorkflowStepRun, finishWorkflowStepRun, validateWorkflowContext } from "./utils";
+import { createWorkflowStepRun, finishWorkflowStepRun, validateWorkflowContext, WorkflowStepRunningError } from "./utils";
 
 const router = express.Router();
 const workflowStep = "generateDerivedAssets" as const;
@@ -271,10 +271,11 @@ export default router.post(
         try {
           await finishWorkflowStepRun(stepRunId, "failed", 0, message);
         } catch (updateError) {
-          console.error("衍生资产步骤失败状态写入失败", updateError);
+          console.error("衍生资产步骤失败状态写入失败", { stepRunId, projectId, scriptId, error: updateError });
         }
       }
-      return res.status(400).send(error(`生成衍生资产失败：${message}`));
+      const status = e instanceof WorkflowStepRunningError ? e.status : 400;
+      return res.status(status).send(error(`生成衍生资产失败：${message}`, null, status));
     }
   },
 );

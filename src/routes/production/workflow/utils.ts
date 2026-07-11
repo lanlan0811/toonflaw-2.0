@@ -18,6 +18,44 @@ export type WorkflowStepRun = {
   updateTime?: number | null;
 };
 
+export class WorkflowStepRunningError extends Error {
+  status = 409;
+
+  constructor() {
+    super("该工作流步骤正在执行，请勿重复提交");
+    this.name = "WorkflowStepRunningError";
+  }
+}
+
+function scopeWorkflowStepRuns(database: any, projectId: number, scriptId: number | null, step: WorkflowStep) {
+  const query = database("o_workflowStepRun").where({ projectId, step });
+  if (scriptId == null) query.whereNull("scriptId");
+  else query.where("scriptId", scriptId);
+  return query;
+}
+
+async function getLatestWorkflowStepRunFrom(database: any, projectId: number, scriptId: number | null, step: WorkflowStep) {
+  return (await scopeWorkflowStepRuns(database, projectId, scriptId, step).orderBy("id", "desc").first()) as WorkflowStepRun | undefined;
+}
+
+async function reconcileWorkflowStepRuns(database: any, projectId: number, scriptId: number | null, step: WorkflowStep) {
+  const latest = await getLatestWorkflowStepRunFrom(database, projectId, scriptId, step);
+  if (!latest?.id) return latest;
+
+  const now = Date.now();
+  await scopeWorkflowStepRuns(database, projectId, scriptId, step)
+    .where("state", "running")
+    .where("id", "<", latest.id)
+    .update({
+      state: "failed",
+      itemCount: 0,
+      errorReason: "已被较新的工作流运行记录取代",
+      endTime: now,
+      updateTime: now,
+    });
+  return latest;
+}
+
 export async function validateWorkflowContext(projectId: number, scriptId?: number | null, requireScript = false) {
   const project = await u.db("o_project").where("id", projectId).first();
   if (!project) throw new Error("项目不存在");
@@ -35,18 +73,13 @@ export async function validateWorkflowContext(projectId: number, scriptId?: numb
 
 export async function getLatestWorkflowStepRun(projectId: number, scriptId: number | null, step: WorkflowStep) {
   if (!(await u.db.schema.hasTable("o_workflowStepRun"))) return undefined;
-  const query = u.db("o_workflowStepRun").where({ projectId, step });
-  if (scriptId == null) query.whereNull("scriptId");
-  else query.where("scriptId", scriptId);
-  return (await query.orderBy("id", "desc").first()) as WorkflowStepRun | undefined;
+  return await getLatestWorkflowStepRunFrom(u.db, projectId, scriptId, step);
 }
 
 export async function createWorkflowStepRun(projectId: number, scriptId: number | null, step: WorkflowStep) {
   return await u.db.transaction(async (trx) => {
-    const query = trx("o_workflowStepRun").where({ projectId, step, state: "running" });
-    if (scriptId == null) query.whereNull("scriptId");
-    else query.where("scriptId", scriptId);
-    if (await query.first()) throw new Error("该工作流步骤正在执行，请勿重复提交");
+    const latest = await reconcileWorkflowStepRuns(trx, projectId, scriptId, step);
+    if (latest?.state === "running") throw new WorkflowStepRunningError();
 
     const now = Date.now();
     const [id] = await trx("o_workflowStepRun").insert({

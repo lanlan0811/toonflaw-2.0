@@ -242,10 +242,17 @@ export default router.post(
           return res.status(400).send(error(`分镜不属于当前项目和剧本批次：${[...new Set(invalidStoryboardIds)].join(", ")}`));
         }
         const storyboardIds = requestedItemIds ? batchStoryboardIds.filter((id) => requestedItemIds.has(id)) : batchStoryboardIds;
+        if (!storyboardIds.length) {
+          return res.status(400).send(error("当前剧本批次没有可用于生成衍生资产的分镜"));
+        }
+        if (!originalAssets.length) {
+          return res.status(400).send(error("该剧本没有可用于生成衍生资产的原始资产"));
+        }
         const latestRun = await getLatestWorkflowStepRun(projectId, realScriptId, step);
-        const runnable = storyboardIds.length > 0 && latestRun?.state !== "running" && (
-          retryFailedOnly ? latestRun?.state === "failed" : compulsory || !latestRun || latestRun.state === "failed"
-        );
+        if (latestRun?.state === "running") {
+          return res.status(409).send(error("该工作流步骤正在执行，请勿重复提交", null, 409));
+        }
+        const runnable = retryFailedOnly ? latestRun?.state === "failed" : compulsory || !latestRun || latestRun.state === "failed";
         return res.status(200).send(
           success({
             step,

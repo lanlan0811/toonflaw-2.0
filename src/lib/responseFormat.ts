@@ -14,9 +14,9 @@ export function success<T>(data: T | null = null, message: string = "成功"): A
 }
 
 // 客户端错误响应
-export function error<T>(message: string = "", data: T | null = null): ApiResponse {
+export function error<T>(message: string = "", data: T | null = null, code: number = 400): ApiResponse {
   return {
-    code: 400,
+    code,
     data,
     message,
   };

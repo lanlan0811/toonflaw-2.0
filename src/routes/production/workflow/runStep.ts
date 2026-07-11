@@ -76,7 +76,8 @@ export default router.post(
       const responseData = axios.isAxiosError(e) ? e.response?.data : undefined;
       const responsePrepared = responseData?.data?.prepared ?? null;
       const message = responseData?.message ?? u.error(e).message;
-      return res.status(400).send(error(message, { prepared: prepared ?? responsePrepared }));
+      const status = axios.isAxiosError(e) && e.response?.status ? e.response.status : 400;
+      return res.status(status).send(error(message, { prepared: prepared ?? responsePrepared }, status));
     }
   },
 );

@@ -1,6 +1,6 @@
 /**
  * Toonflow AI供应商模板
- * @version 2.1
+ * @version 2.0
  */
 
 // ============================================================
@@ -20,8 +20,6 @@ interface TextModel {
   modelName: string;
   type: "text";
   think: boolean;
-  inputCapabilities?: ("text" | "image" | "audio" | "video")[]; // 模型真实支持的输入类型
-  toolCalling?: boolean; // 模型及当前 API 适配是否真实支持工具调用
 }
 
 interface ImageModel {
@@ -135,7 +133,7 @@ declare const exports: {
 
 const vendor: VendorConfig = {
   id: "null",
-  version: "2.1",
+  version: "2.0",
   author: "Toonflow",
   name: "空模板",
   description: "## 开发模板，您可以使用此模板进行Vibe Coding",
@@ -144,40 +142,7 @@ const vendor: VendorConfig = {
     { key: "baseUrl", label: "请求地址", type: "url", required: true, placeholder: "示例：https://api.openai.com/v1" },
   ],
   inputValues: { apiKey: "", baseUrl: "https://api.openai.com/v1" },
-  models: [
-    {
-      name: "GPT-4o",
-      modelName: "gpt-4o",
-      type: "text",
-      think: false,
-      inputCapabilities: ["text", "image"],
-      toolCalling: true,
-    },
-    /*
-     * 转绘模型声明示例（请替换为目标平台真实存在并已完成适配的模型）：
-     *
-     * {
-     *   name: "原生视频理解模型",
-     *   modelName: "your-multimodal-model",
-     *   type: "text",
-     *   think: false,
-     *   inputCapabilities: ["text", "image", "video"],
-     *   toolCalling: true,
-     * },
-     * {
-     *   name: "视频参考生成模型",
-     *   modelName: "your-video-generation-model",
-     *   type: "video",
-     *   mode: ["text", ["videoReference:1", "imageReference:4"]],
-     *   audio: false,
-     *   durationResolutionMap: [
-     *     { duration: [5, 10], resolution: ["1152x768", "768x1152"] },
-     *   ],
-     * },
-     *
-     * 不能只复制能力标签：textRequest / videoRequest 和目标 API 必须真实支持对应输入。
-     */
-  ],
+  models: [{ name: "GPT-4o", modelName: "gpt-4o", type: "text", think: false }],
 };
 
 // ============================================================
@@ -203,7 +168,7 @@ const ttsRequest = async (config: TTSConfig, model: TTSModel): Promise<string> =
 };
 
 const checkForUpdates = async (): Promise<{ hasUpdate: boolean; latestVersion: string; notice: string }> => {
-  return { hasUpdate: false, latestVersion: "2.1", notice: "## 新版本更新公告" };
+  return { hasUpdate: false, latestVersion: "2.0", notice: "## 新版本更新公告" };
 };
 
 const updateVendor = async (): Promise<string> => {
@@ -239,7 +204,6 @@ export {};
  *   1. 目标 API 的 curl 请求示例（包含请求地址、Headers、Body 结构、响应结构）
  *   2. 目标 API 的官方文档链接或文档截图/文本内容
  *   3. 需要适配的模型类型（text / image / video / tts）及其能力说明
- *   4. 若用于转绘，分别提供视频理解模型和视频参考生成模型的 API 能力依据
  * 没有足够信息时，应主动追问，不要凭空编造 API 结构。
  *
  * 【代码规则】
@@ -304,12 +268,6 @@ export {};
  *      - 如何从 config.referenceList 中提取对应类型的引用
  *      - 如何构造 API 请求体中的图片/视频/音频参数
  *
- *    转绘生成时至少需要一个真实支持视频参考的 VideoModel：
- *      mode: ["text", ["videoReference:1", "imageReference:4"]]
- *    "videoReference:1" 表示单次请求最多接收一个源视频片段，不是多模态大语言模型的
- *    视频理解声明。只有目标视频生成 API 和 videoRequest 都能消费 type === "video" 的
- *    referenceList 时才能声明；禁止为了通过校验而虚假填写。
- *
  * 8. 异步任务处理
  *    对于视频生成等需要轮询的异步任务，使用全局的 pollTask 函数：
  *    const result = await pollTask(async () => {
@@ -334,10 +292,6 @@ export {};
  *     - version：语义化版本格式 "x.y"。
  *     - inputs：根据目标 API 所需的认证信息配置（API Key、Secret、请求地址等）。
  *     - models：根据目标平台支持的模型列表填写，注意正确设置 type 和各模型特有字段。
- *       - TextModel 的 inputCapabilities 必须按 API 的真实输入能力填写，可选 text、image、audio、video。
- *       - TextModel 的 toolCalling 只有在模型和当前 SDK/API 适配都支持工具调用时才能设为 true。
- *       - 简易转绘 Agent 要求同一个 TextModel 同时声明 text、image、video 和 toolCalling。
- *       - 高级转绘 Agent 可按各子任务要求分别选择不同 TextModel。
  *       - VideoModel 的 mode 对应 API 支持的输入模式（参见规则 7 的 VideoMode 说明）。
  *       - VideoModel 的 audio 字段：true（始终生成音频）、false（不生成）、"optional"（用户可选）。
  *       - VideoModel 的 durationResolutionMap 对应各时长下可选的分辨率。

@@ -9,17 +9,17 @@
 >
 > 原始项目完整仓库地址：
 >
-> - GitHub：<https://github.com/HBAI-Ltd/Toonflow-app>
-> - Gitee：<https://gitee.com/HBAI-Ltd/Toonflow-app>
-> - GitCode：<https://gitcode.com/HBAI-Ltd/Toonflow-app>
-> - AtomGit：<https://atomgit.com/HBAI-Ltd/Toonflow-app>
+> - [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/HBAI-Ltd/Toonflow-app) <https://github.com/HBAI-Ltd/Toonflow-app>
+> - [![Gitee](https://img.shields.io/badge/Gitee-C71D23?style=flat-square&logo=gitee&logoColor=white)](https://gitee.com/HBAI-Ltd/Toonflow-app) <https://gitee.com/HBAI-Ltd/Toonflow-app>
+> - [![GitCode](https://img.shields.io/badge/GitCode-FC5531?style=flat-square&logo=git&logoColor=white)](https://gitcode.com/HBAI-Ltd/Toonflow-app) <https://gitcode.com/HBAI-Ltd/Toonflow-app>
+> - [![AtomGit](https://img.shields.io/badge/AtomGit-DA203E?style=flat-square&logo=git&logoColor=white)](https://atomgit.com/HBAI-Ltd/Toonflow-app) <https://atomgit.com/HBAI-Ltd/Toonflow-app>
 >
 > 原项目关联的前端源代码仓库：
 >
-> - GitHub：<https://github.com/HBAI-Ltd/Toonflow-web>
-> - Gitee：<https://gitee.com/HBAI-Ltd/Toonflow-web>
+> - [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/HBAI-Ltd/Toonflow-web) <https://github.com/HBAI-Ltd/Toonflow-web>
+> - [![Gitee](https://img.shields.io/badge/Gitee-C71D23?style=flat-square&logo=gitee&logoColor=white)](https://gitee.com/HBAI-Ltd/Toonflow-web) <https://gitee.com/HBAI-Ltd/Toonflow-web>
 >
-> 当前二次开发仓库：<https://gitee.com/lan0811/toonflaw-2.0>
+> 当前二次开发仓库：[![Gitee](https://img.shields.io/badge/Gitee-C71D23?style=flat-square&logo=gitee&logoColor=white)](https://gitee.com/lan0811/toonflaw-2.0) <https://gitee.com/lan0811/toonflaw-2.0>
 
 <div align="center">
   <table>

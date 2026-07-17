@@ -5,7 +5,6 @@ import { Knex } from "knex";
 import db from "@/utils/db";
 import { transform } from "sucrase";
 import rawVendorData from "./vendor.json";
-import { ensureRedrawAgentConfigs, ensureRedrawTables } from "@/lib/redrawSchema";
 
 const vendorData = rawVendorData as Record<string, string>;
 
@@ -42,17 +41,12 @@ export default async (knex: Knex): Promise<void> => {
       table.string("state").notNullable();
       table.integer("itemCount").defaultTo(0);
       table.text("errorReason");
-      table.string("inputHash");
-      table.text("metadata");
       table.integer("startTime").notNullable();
       table.integer("endTime");
       table.integer("updateTime").notNullable();
       table.index(["projectId", "scriptId", "step", "id"]);
     });
   }
-  await addColumn("o_workflowStepRun", "inputHash", "string");
-  await addColumn("o_workflowStepRun", "metadata", "text");
-  await ensureRedrawTables(knex);
   await knex("o_workflowStepRun").where("state", "running").update({
     state: "failed",
     errorReason: "软件退出导致失败",
@@ -87,21 +81,6 @@ export default async (knex: Knex): Promise<void> => {
   await db("o_video").where("state", "生成中").update({
     state: "生成失败",
     errorReason: "软件退出导致失败",
-  });
-  await db("o_redrawSource").where("analysisState", "running").update({
-    analysisState: "failed",
-    errorReason: "软件退出导致失败，可重新执行视频分析",
-    updateTime: Date.now(),
-  });
-  await db("o_redrawSegment").whereIn("state", ["running", "generating", "reviewing"]).update({
-    state: "failed",
-    errorReason: "软件退出导致失败，可仅重试失败项",
-    updateTime: Date.now(),
-  });
-  await db("o_redrawOutput").where("state", "running").update({
-    state: "failed",
-    errorReason: "软件退出导致失败，可重新合成",
-    updateTime: Date.now(),
   });
 
   // 添加新字段
@@ -236,13 +215,6 @@ export default async (knex: Knex): Promise<void> => {
   const toonflowVer = await u.vendor.getVendor("toonflow").version;
   if (Number(toonflowVer) < 3.2) {
     u.vendor.writeCode("toonflow", vendorData["toonflow.ts"]);
-  }
-  await ensureRedrawAgentConfigs(knex);
-  try {
-    const agnesVer = await u.vendor.getVendor("agnes-ai").version;
-    if (Number(agnesVer) < 2.3) u.vendor.writeCode("agnes-ai", vendorData["agnes-ai.ts"]);
-  } catch {
-    // 未安装 Agnes AI 的已有环境无需迁移；之后启用时会使用内置 2.3 模板。
   }
 };
 

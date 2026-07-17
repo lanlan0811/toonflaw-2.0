@@ -3,10 +3,7 @@
 node_modules
 .vscode
 .zcode
-.codex/*
-!.codex/plans/
-.codex/plans/*
-!.codex/plans/redraw-project.md
+.codex
 
 # output
 out

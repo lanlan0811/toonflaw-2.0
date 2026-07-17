@@ -1,6 +1,5 @@
 import express from "express";
-import { error, success } from "@/lib/responseFormat";
-import { assertRedrawAgentModel } from "@/lib/redrawModel";
+import { success } from "@/lib/responseFormat";
 import u from "@/utils";
 import { z } from "zod";
 import { validateFields } from "@/middleware/middleware";
@@ -24,18 +23,6 @@ export default router.post(
   }),
   async (req, res) => {
     const { items } = req.body;
-    const ids = items.map((item: any) => item.id);
-    const currentItems = await u.db("o_agentDeploy").whereIn("id", ids).select("id", "key");
-    try {
-      for (const item of items) {
-        const current = currentItems.find((value) => value.id === item.id);
-        if (current?.key?.startsWith("redrawAgent") && item.modelName) {
-          await assertRedrawAgentModel(current.key, item.modelName);
-        }
-      }
-    } catch (cause) {
-      return res.status(400).send(error(cause instanceof Error ? cause.message : "模型能力不兼容"));
-    }
     for (const item of items) {
       const { id, name, model, modelName, vendorId, desc, temperature, maxOutputTokens } = item;
       await u.db("o_agentDeploy").where({ id }).update({ id, name, model, modelName, vendorId, desc, temperature, maxOutputTokens });

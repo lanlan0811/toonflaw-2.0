@@ -8,7 +8,6 @@ directories:
 
 files:
   - build/**/*
-  - THIRD_PARTY_NOTICES.md
   - scripts/web/**/*
   - env/**/*
   - package.json
@@ -25,8 +24,6 @@ asar: true
 asarUnpack:
   - "**/node_modules/sharp/**"
   - "**/node_modules/@img/**"
-  - "**/node_modules/@ffmpeg-installer/**"
-  - "**/node_modules/@ffprobe-installer/**"
 
 extraResources:
   - from: data

@@ -18,8 +18,6 @@ const external = [
   "sqlite3",
   "better-sqlite3",
   "sharp",
-  "@ffmpeg-installer/ffmpeg",
-  "@ffprobe-installer/ffprobe",
   "mysql",
   "mysql2",
   "pg",
@@ -71,11 +69,6 @@ const mainBuildConfig: esbuild.BuildOptions = {
   },
 };
 
-const removeTrailingWhitespace = (filePath: string) => {
-  const source = fs.readFileSync(filePath, "utf8");
-  fs.writeFileSync(filePath, source.replace(/[ \t]+(?=\r?\n|$)/g, ""), "utf8");
-};
-
 (async () => {
   try {
     console.log("🔨 开始构建...\n");
@@ -84,8 +77,6 @@ const removeTrailingWhitespace = (filePath: string) => {
 
     // 并行构建
     await Promise.all([esbuild.build(appBuildConfig), esbuild.build(mainBuildConfig)]);
-    removeTrailingWhitespace(appBuildConfig.outfile!);
-    removeTrailingWhitespace(mainBuildConfig.outfile!);
 
     console.log("✅ 后端服务构建完成: build/app.js");
     console.log("✅ Electron主进程构建完成: build/main.js");

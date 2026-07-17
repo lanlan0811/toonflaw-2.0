@@ -41,12 +41,6 @@ class OSS {
     await this.initPromise;
   }
 
-  /** 返回经 OSS 根目录约束校验后的本地绝对路径，仅供后端媒体工具使用。 */
-  async getLocalPath(userRelPath: string): Promise<string> {
-    await this.ensureInit();
-    return resolveSafeLocalPath(userRelPath, this.rootDir);
-  }
-
   /**
    * 获取指定相对路径文件的访问 URL。
    * @param userRelPath 用户传入的相对文件路径（使用 / 作为分隔符）

@@ -7,6 +7,5 @@ const result: Record<string, string> = {};
 for (const file of files) {
   result[file] = fs.readFileSync(path.join(vendorDir, file), "utf-8");
 }
-const outputFile = path.join("src", "lib", "vendor.json");
-fs.writeFileSync(outputFile, JSON.stringify(result, null, 2), "utf-8");
-console.log(`Done, saved ${outputFile}`);
+fs.writeFileSync(path.join(vendorDir, "vendor.json"), JSON.stringify(result, null, 2), "utf-8");
+console.log("Done, saved vendor.json");

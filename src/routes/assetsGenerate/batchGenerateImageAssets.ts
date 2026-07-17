@@ -69,7 +69,6 @@ const requestSchema = {
       name: z.string(),
       prompt: z.string(),
       base64: z.string().optional().nullable(),
-      referenceList: z.array(z.object({ type: z.literal("image"), base64: z.string() })).optional(),
     }),
   ),
 };
@@ -96,7 +95,7 @@ export default router.post("/", validateFields(requestSchema), async (req, res) 
   // 3. 后台异步并发生成，不阻塞响应
   const limit = pLimit(concurrentCount ?? 1);
 
-  const tasks = items.map((item: { id: number; type: string; name: string; prompt: string; base64: string | null | undefined; referenceList?: { type: "image"; base64: string }[] }, index: number) =>
+  const tasks = items.map((item: { id: number; type: string; name: string; prompt: string; base64: string | null | undefined }, index: number) =>
     limit(async () => {
       const imageId = totalNovelId[index];
       const data = await u.db("o_image").where("id", imageId).select("state").first();
@@ -113,17 +112,11 @@ export default router.post("/", validateFields(requestSchema), async (req, res) 
       const describe = `生成${cfg.label}图，名称：${item.name}，提示词：${item.prompt}`;
       const relatedObjects = { id: item.id, projectId, type: cfg.label };
       try {
-        const references = item.referenceList?.length ? item.referenceList : item.base64 ? [{ base64: item.base64, type: "image" as const }] : [];
-        if (references.length > 1) {
-          const [vendorId, modelName] = model.split(/:(.+)/);
-          const selected = (await u.vendor.getModelList(vendorId)).find((candidate: any) => candidate.modelName === modelName);
-          if (!selected?.mode?.includes("multiReference")) throw new Error("所选图片模型不支持 multiReference 多参考图输入");
-        }
         const aiImage = u.Ai.Image(model);
         await aiImage.run(
           {
             prompt: userPrompt,
-            referenceList: references,
+            referenceList: item.base64 ? [{ base64: item.base64, type: "image" }] : [],
             size: resolution,
             aspectRatio: "16:9",
           },

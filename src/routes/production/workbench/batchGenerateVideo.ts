@@ -119,11 +119,6 @@ export default router.post(
                   type: asset.type === "audio" ? "audio" : "image",
                 };
               }
-              if (item.sources === "redrawSegment") {
-                const segment = await (u.db as any)("o_redrawSegment").where({ id: item.id, projectId }).select("sourceClipPath").first();
-                if (!segment?.sourceClipPath) throw new Error(`转绘片段 ${item.id} 没有可用源视频`);
-                return { base64: await u.oss.getImageBase64(segment.sourceClipPath), type: "video" };
-              }
               throw new Error(`不支持的参考资源类型：${item.sources}`);
             }),
           );

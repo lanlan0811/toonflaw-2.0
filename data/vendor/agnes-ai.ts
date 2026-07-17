@@ -1,6 +1,6 @@
 /**
  * Toonflow AI供应商模板 - Agnes AI
- * @version 2.3
+ * @version 2.2
  */
 
 // ============================================================
@@ -20,8 +20,6 @@ interface TextModel {
   modelName: string;
   type: "text";
   think: boolean;
-  inputCapabilities?: ("text" | "image" | "audio" | "video")[];
-  toolCalling?: boolean;
 }
 
 interface ImageModel {
@@ -135,7 +133,7 @@ declare const exports: {
 
 const vendor: VendorConfig = {
   id: "agnes-ai",
-  version: "2.3",
+  version: "2.2",
   author: "Toonflow",
   name: "Agnes AI",
   description: "Agnes AI 全模态 API - 文本、图像、视频生成，支持多模态输入\n[前往平台](https://agnes-ai.com/)",
@@ -145,22 +143,8 @@ const vendor: VendorConfig = {
   ],
   inputValues: { apiKey: "", baseUrl: "https://apihub.agnes-ai.com/v1" },
   models: [
-    {
-      name: "Agnes 2.0 Flash",
-      modelName: "agnes-2.0-flash",
-      type: "text",
-      think: true,
-      inputCapabilities: ["text", "image", "audio", "video"],
-      toolCalling: true,
-    },
-    {
-      name: "Agnes 1.5 Flash",
-      modelName: "agnes-1.5-flash",
-      type: "text",
-      think: false,
-      inputCapabilities: ["text", "image"],
-      toolCalling: true,
-    },
+    { name: "Agnes 2.0 Flash", modelName: "agnes-2.0-flash", type: "text", think: true },
+    { name: "Agnes 1.5 Flash", modelName: "agnes-1.5-flash", type: "text", think: false },
     { name: "Agnes Image 2.1 Flash", modelName: "agnes-image-2.1-flash", type: "image", mode: ["text", "singleImage"] },
     { name: "Agnes Image 2.0 Flash", modelName: "agnes-image-2.0-flash", type: "image", mode: ["text", "singleImage", "multiReference"] },
     {

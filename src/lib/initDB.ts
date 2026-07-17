@@ -1,8 +1,6 @@
 import { Knex } from "knex";
 import { v4 as uuid } from "uuid";
 import { getEmbedding } from "@/utils/agent/embedding";
-import { redrawAgentConfigs } from "@/constants/redraw";
-import { redrawTableSchemas } from "@/lib/redrawSchema";
 
 interface TableSchema {
   name: string;
@@ -260,17 +258,6 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
             maxOutputTokens: 0,
             disabled: false,
           },
-          ...redrawAgentConfigs.map((agent) => ({
-            model: "",
-            modelName: "",
-            vendorId: null,
-            key: agent.key,
-            name: agent.name,
-            desc: agent.desc,
-            temperature: 1,
-            maxOutputTokens: 0,
-            disabled: false,
-          })),
         ]);
       },
     },
@@ -1029,15 +1016,12 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         table.string("state").notNullable(); // running | success | empty | failed
         table.integer("itemCount").defaultTo(0);
         table.text("errorReason");
-        table.string("inputHash");
-        table.text("metadata");
         table.integer("startTime").notNullable();
         table.integer("endTime");
         table.integer("updateTime").notNullable();
         table.index(["projectId", "scriptId", "step", "id"]);
       },
     },
-    ...redrawTableSchemas,
     //记忆表（message=原始消息, summary=压缩摘要）
     {
       name: "memories",

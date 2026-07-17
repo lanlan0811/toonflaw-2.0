@@ -1159,6 +1159,11 @@
   function autoLayout() {
     if (!app.canvas || !app.canvas.nodes.length) return;
     const nodes = app.canvas.nodes;
+    const nodeElements = new Map(
+      Array.from(app.root ? app.root.querySelectorAll(".tf-promo-node") : [])
+        .map((element) => [element.dataset.nodeId, element])
+    );
+    const fallbackHeights = { upload: 320, image: 520, video: 420 };
     const indegree = new Map(nodes.map((node) => [node.id, 0]));
     app.canvas.edges.forEach((edge) => indegree.set(edge.target, (indegree.get(edge.target) || 0) + 1));
     const queue = nodes.filter((node) => indegree.get(node.id) === 0).map((node) => node.id);
@@ -1185,9 +1190,15 @@
       levels.get(level).push(node);
     });
     Array.from(levels.keys()).sort((a, b) => a - b).forEach((level) => {
-      levels.get(level).forEach((node, index) => {
+      let nextY = 115;
+      levels.get(level).forEach((node) => {
         node.position.x = 90 + level * 430;
-        node.position.y = 115 + index * 430;
+        node.position.y = nextY;
+        const element = nodeElements.get(node.id);
+        const height = element && element.offsetHeight
+          ? element.offsetHeight
+          : fallbackHeights[node.type] || 360;
+        nextY += height + 80;
       });
     });
     saveCanvas(true);
@@ -1292,19 +1303,72 @@
     });
   }
 
-  function createMedia(url, emptyText) {
+  function normalizeMediaRatio(value) {
+    const match = String(value || "").trim().match(/^(\d+(?:\.\d+)?)\s*(?::|\/)\s*(\d+(?:\.\d+)?)$/);
+    if (!match) return "";
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return "";
+    return `${width}:${height}`;
+  }
+
+  function scheduleMediaGeometryRefresh() {
+    requestAnimationFrame(() => {
+      renderEdges();
+      requestAnimationFrame(renderEdges);
+    });
+  }
+
+  function saveNodeMediaRatio(node, value) {
+    const ratio = normalizeMediaRatio(value);
+    const current = normalizeMediaRatio(node.data.mediaRatio);
+    if (ratio === current) return;
+    if (ratio) node.data.mediaRatio = ratio;
+    else delete node.data.mediaRatio;
+    saveCanvas();
+  }
+
+  function createMedia(url, emptyText, ratioHint, onRatioChange) {
     const media = make("div", "tf-promo-media");
     if (url) {
+      const hint = normalizeMediaRatio(ratioHint);
+      media.classList.add("tf-promo-media-has-image");
+      if (hint) media.style.setProperty("--tf-promo-media-ratio", hint.replace(":", " / "));
       const image = document.createElement("img");
       image.alt = emptyText || "节点图片";
-      image.src = url;
-      image.addEventListener("error", () => {
+      let settled = false;
+      const handleLoad = () => {
+        if (settled) return;
+        const width = image.naturalWidth;
+        const height = image.naturalHeight;
+        if (!width || !height) {
+          handleError();
+          return;
+        }
+        settled = true;
+        const ratio = `${width}:${height}`;
+        media.style.setProperty("--tf-promo-media-ratio", `${width} / ${height}`);
+        media.classList.add("tf-promo-media-ready");
+        if (onRatioChange) onRatioChange(ratio);
+        scheduleMediaGeometryRefresh();
+      };
+      const handleError = () => {
+        if (settled) return;
+        settled = true;
         image.remove();
+        media.classList.remove("tf-promo-media-has-image", "tf-promo-media-ready");
+        media.style.removeProperty("--tf-promo-media-ratio");
         const placeholder = make("div", "tf-promo-media-placeholder");
         placeholder.innerHTML = `${ICONS.image}<span>图片加载失败</span>`;
         media.appendChild(placeholder);
-      }, { once: true });
+        if (onRatioChange) onRatioChange("");
+        scheduleMediaGeometryRefresh();
+      };
+      image.addEventListener("load", handleLoad, { once: true });
+      image.addEventListener("error", handleError, { once: true });
       media.appendChild(image);
+      image.src = url;
+      if (image.complete) Promise.resolve().then(() => image.naturalWidth ? handleLoad() : handleError());
     } else {
       const placeholder = make("div", "tf-promo-media-placeholder");
       placeholder.innerHTML = `${ICONS.image}<span>${emptyText || "暂无图片"}</span>`;
@@ -1345,7 +1409,7 @@
   function renderUploadNode(node) {
     const element = createNodeShell(node, "上传图片", "image");
     const body = make("div", "tf-promo-node-body");
-    const media = createMedia(node.data.url, "点击上传 JPEG / PNG");
+    const media = createMedia(node.data.url, "点击上传 JPEG / PNG", node.data.mediaRatio, (ratio) => saveNodeMediaRatio(node, ratio));
     const upload = make("label", `tf-promo-upload-label${node.data.url ? " tf-promo-upload-has-image" : ""}`, node.data.url ? "更换图片" : "");
     const file = document.createElement("input");
     file.type = "file";
@@ -1368,7 +1432,12 @@
   function renderImageNode(node) {
     const element = createNodeShell(node, "图片生成", "spark");
     const body = make("div", "tf-promo-node-body");
-    body.appendChild(createMedia(node.data.resultUrl, "生成结果将在这里显示"));
+    body.appendChild(createMedia(
+      node.data.resultUrl,
+      "生成结果将在这里显示",
+      node.data.mediaRatio || node.data.ratio,
+      (ratio) => saveNodeMediaRatio(node, ratio)
+    ));
     const prompt = make("textarea", "tf-promo-textarea");
     prompt.placeholder = "描述希望生成的产品图片…";
     prompt.value = node.data.prompt || "";
@@ -1507,6 +1576,7 @@
       });
       const url = typeof result === "string" ? result : result && (result.url || result.src || result.filePath);
       if (!url) throw new Error("上传成功但未返回图片地址");
+      delete node.data.mediaRatio;
       node.data.url = url;
       node.data.status = "success";
       node.data.error = "";
@@ -1804,6 +1874,7 @@
       });
       const url = result && (result.url || result.src || result.filePath) || (typeof result === "string" ? result : "");
       if (!url) throw new Error("图片生成完成，但没有返回结果地址");
+      delete node.data.mediaRatio;
       node.data.resultUrl = url;
       node.data.status = "success";
       node.data.error = "";

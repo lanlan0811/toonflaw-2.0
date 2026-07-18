@@ -62,10 +62,10 @@
 
 ## 项目定位
 
-这是一个面向 AI 短剧、漫剧和产品宣传片生产的本地工作台。项目保留 Toonflow 原有的小说、剧本、资产、分镜和视频生产能力，并在此基础上补充了两条独立业务线：
+这是一个面向 AI 短剧、漫剧和商品视觉内容生产的本地工作台。项目保留 Toonflow 原有的小说、剧本、资产、分镜和视频生产能力，并在此基础上补充了两条独立业务线：
 
 1. 以分镜表为起点的 AI 短剧生产闭环。
-2. 以节点画布为核心的单条产品宣传片生成工作区。
+2. 以多 SKU 无限画布为核心的商品视觉工厂 v2。
 
 当前版本号为 `1.1.9`。应用可作为 Electron 桌面端运行，也可以单独启动本地 HTTP 服务。业务数据、生成素材和工作流状态默认保存在本机。
 
@@ -134,28 +134,32 @@
 
 工作流会按 `projectId + scriptId` 隔离不同项目与导入批次，并为每一步提供总数、已完成数、失败数、生成中数量、可执行数量和阻塞原因。已完成项不会在普通执行中重复提交；失败项可以单独重试，必要时也可以强制重新生成。
 
-### 5. 产品宣传片独立工作区
+### 5. 商品视觉工厂 v2（无限画布）
 
 访问地址：
 
 ```text
-/#/product-promo
-/#/product-promo?projectId=<项目ID>
+/#/product-factory
+/#/product-factory?projectId=<项目ID>
 ```
 
-该工作区从主界面侧边栏直接进入，使用带内部标记的项目与普通短剧项目隔离。主要能力包括：
+商品视觉工厂项目使用 `commerce` 项目类型，与普通短剧项目隔离。一个项目可以管理多个 SKU，但画布一次只加载当前 SKU；项目入口负责 SKU 摘要列表和批量操作，单 SKU 详情再加载对应工作流与产物。工作区由顶栏、SKU 列表、中央画布和右侧节点检查器组成，主要能力包括：
 
-- 宣传片项目的新建、编辑、打开和删除；
-- 上传图片、图片生成、最终视频三类节点；
-- 节点拖拽、连线、缩放、平移、适配视图和自动排版；
-- 自连、重复边、循环和视频节点出边校验；
-- 根据上游连线自动收集图片参考；
-- 按拓扑依赖一键生成并从失败节点续跑；
-- 图片原始比例展示，竖图不裁切；
-- 视频任务轮询、失败原因、播放、打开和下载；
-- 面向商业产品图与产品视频的内置提示词模板。
+- SKU 摘要分页（默认每页 50 条）、搜索、状态筛选、批量勾选、CSV/图片文件夹导入和单个 SKU 新建；
+- 品牌设置、商品参考图、图片/视频模型、并发数和默认生成参数配置；
+- 无限画布、鼠标锚点缩放（`25%–200%`）、空格平移、`Shift` 框选、`Ctrl/Cmd` 多选、小地图、适配视图和自动排版；
+- 复制、粘贴、删除、撤销、重做，以及非执行型分组框和便签；来源节点与人工审核节点为受保护系统节点；
+- `source`、`image`、`review`、`video` 四类生产节点，另有 `group` 和 `note` 装饰节点。标准工作流提供四种图片角色（主图、棚拍场景、生活场景、材质特写）和两种视频角色（英雄镜头、生活镜头），支持 `9:16` 与 `16:9`；
+- 端口化连线表达真实参考图输入，支持图片派生链、人工审核候选，以及视频的主参考、首帧、尾帧和多参考输入；服务端拒绝循环、无效端口和绕过审核门的视频连线；
+- 单节点执行、运行下游和跨 SKU 批量执行。运行前必须先预览任务数、跳过原因、模型、参考图和费用风险，并明确确认后入队；缺失或失效的必要上游会按拓扑自动补齐；
+- 节点提示词模板预览、分区覆盖、恢复、升级和可选 AI 润色；节点可以继承项目模型，也可以单独覆盖，模型能力会校验参考图数量、时长、分辨率和音频参数；
+- 图片候选审核和视频端口绑定。审核门未完成时不会提交视频任务；任务中心提供进度、暂停/中断恢复、失败重试和重复签名跳过；
+- 项目工作流模板保存、差异预览和批量应用。默认保留 SKU 自定义节点、提示词、模型覆盖和布局，强制覆盖需要二次确认；
+- 导出已批准图片、成功视频和 `manifest.csv` 的 ZIP 素材包。删除节点只会将其从当前生产流程移除，历史产物仍保留并标记为脱离工作流。
 
-宣传片画布保存在浏览器本地存储中，键名按项目隔离；Base64 原始文件不会写入本地存储。第一版以单次视频模型生成的一条成片为目标，不包含多片段剪辑、字幕合成或独立音轨混合。
+工作流图使用 Graph v2（`version: 2`），节点带有稳定的 `outputKey`、`roleKey`、模型覆盖、运行参数和端口信息，连线带有 `sourcePort`/`targetPort`。工作流保存带 `revision` 和基础版本检测，布局变化与语义变化分开计算：移动、缩放、分组和便签不会使历史产物失效；模型、提示词、连线或输入变化只影响对应节点及其下游。
+
+数据保存在 `o_productFactory*` 本地表中，v1 工作流会在首次读取时幂等迁移并保留 `v1Backup`；旧模型和 Vendor 配置不会被迁移或改写。旧版 `/#/product-promo` 路由仍可进入迁移流程：系统会尝试导入旧本地画布和可定位的历史媒体，迁移可重复执行，旧本地存储不会自动删除。
 
 ## 保留的 Toonflow 基础能力
 
@@ -196,7 +200,7 @@
 | 图像处理 | Sharp |
 | 桌面端 | Electron 40、electron-builder |
 | 构建 | esbuild、tsx |
-| 内置前端 | 已构建 Web 资源 + 原生 JavaScript/CSS 二开补丁 |
+| 内置前端 | 已构建 Web 资源 + TypeScript 商品视觉工厂 bundle + 原生 JavaScript/CSS 二开补丁 |
 
 ## 目录说明
 
@@ -206,9 +210,12 @@
 │  ├─ agents/                         # ScriptAgent 与 ProductionAgent
 │  ├─ constants/                      # 项目类型和工作流步骤定义
 │  ├─ lib/                            # 数据库、资产统计和通用能力
-│  └─ routes/
-│     ├─ storyboardImport/            # 分镜表解析、提交和管理接口
-│     └─ production/workflow/         # 生产步骤准备、进度和执行接口
+│  │  └─ productFactory/              # Graph、迁移、提示词、队列和导出
+│  ├─ routes/
+│  │  ├─ storyboardImport/            # 分镜表解析、提交和管理接口
+│  │  ├─ production/workflow/         # 生产步骤准备、进度和执行接口
+│  │  └─ productFactory/              # 商品视觉工厂 v2 API
+│  └─ web/productFactory/             # 商品视觉工厂 TypeScript 前端与画布
 ├─ data/
 │  ├─ serve/app.js                    # 构建后的生产服务入口
 │  ├─ skills/                         # Agent 与美术风格技能文件
@@ -218,13 +225,14 @@
 │  └─ oss/                            # 本地生成素材
 ├─ scripts/                           # 构建、Electron 和打包脚本
 ├─ test/storyboardImport/             # 分镜表资产与解析回归测试
+├─ test/productFactory/                # 商品视觉工厂 Graph、迁移、队列和 API 测试
 ├─ docs/secondary-development-workflow.md
 │                                      # 二开接口说明
 ├─ .zcode/plans/                       # 已有二次开发计划记录
 └─ .codex/plans/                       # 当前协作计划记录
 ```
 
-`data/web/index.html` 是已构建前端产物，并非完整可维护的 Vue 源码。本仓库新增页面通过 `secondary-dev-patch.js`、`product-promo-studio.js` 及对应样式注入。替换或重新构建 `data/web` 前，请先确认这些二开文件和入口引用不会被覆盖。
+`data/web/index.html` 是已构建前端产物，并非完整可维护的 Vue 源码。本仓库新增页面通过 `secondary-dev-patch.js`、`product-factory-studio.js` 及对应样式注入；`product-promo-studio.js` 仅用于旧版宣传片兼容。替换或重新构建 `data/web` 前，请先确认这些二开文件和入口引用不会被覆盖。
 
 ## 环境准备
 
@@ -324,17 +332,18 @@ yarn start
 
 同一项目可以存在多个导入批次。涉及资产、分镜和视频的操作应始终确认当前 `scriptId`，避免跨批次执行。
 
-## 使用产品宣传片工作区
+## 使用商品视觉工厂
 
-1. 从侧边栏进入“产品宣传片”。
-2. 新建项目并填写产品说明、画面比例、图片模型和视频模型。
-3. 在默认画布中上传产品参考图。
-4. 编辑图片节点和视频节点提示词。
-5. 检查节点连线所代表的参考图依赖。
-6. 单独生成节点，或使用“一键生成”按依赖顺序执行。
-7. 在右侧结果区预览、打开或下载生成视频。
+1. 从侧边栏进入“商品视觉工厂”，新建或打开 `commerce` 项目。
+2. 在项目设置中配置品牌信息、默认图片/视频模型、画质、比例、并发数和提示词策略。
+3. 新建单个 SKU，或导入包含 `sku`、`name`、`category`、`description`、`selling_points` 的 CSV；也可以选择图片文件夹按 SKU 匹配参考图。
+4. 打开 SKU 画布，上传商品主参考、补充参考或品牌参考，按需编辑图片/视频节点提示词、运行参数和模型覆盖。
+5. 通过端口连线表达真实输入，使用画布工具完成平移、缩放、框选、多选、复制粘贴、撤销重做和自动排版。
+6. 先点击节点“运行”或“运行下游”，在任务预览中检查任务数量、跳过原因、参考图和费用风险，确认后再入队；跨 SKU 任务从批量中心选择图片/视频阶段与角色。
+7. 在审核节点选择图片候选，并在视频节点中绑定主参考、首尾帧或多参考端口；审核完成后再预览并提交视频任务。
+8. 在任务中心查看进度，必要时恢复暂停/中断任务或重试失败任务；完成后从导出抽屉下载已批准图片、成功视频和 `manifest.csv`。
 
-画布结构保存在当前浏览器或 Electron 用户数据目录对应的本地存储中。清理浏览器数据、删除项目或更换用户数据目录前，请自行确认是否需要保留画布信息。
+商品视觉工厂的工作流、版本和产物保存在本地 SQLite 数据库与素材目录中。清理 Electron 用户数据目录、删除项目或迁移旧版宣传片前，请先确认是否需要保留工作流和历史产物。
 
 ## 常用检查
 
@@ -345,8 +354,12 @@ yarn lint
 # 分镜表解析与资产关联回归测试
 yarn test:storyboard-import
 
+# 商品视觉工厂 v2 回归测试
+yarn test:product-factory
+
 # 二开前端脚本语法检查
 node --check data/web/secondary-dev-patch.js
+node --check data/web/product-factory-studio.js
 node --check data/web/product-promo-studio.js
 
 # 生成生产服务和 Electron 主进程构建文件
@@ -356,7 +369,7 @@ yarn build
 git diff --check
 ```
 
-分镜表自动化测试不会导入真实数据库初始化链，也不应修改 `data/db2.sqlite`。
+分镜表和商品视觉工厂自动化测试使用独立测试初始化，不应修改 `data/db2.sqlite` 或真实 Vendor 配置。商品视觉工厂测试覆盖 Graph v2、v1 迁移、模板差异、节点/下游任务、审核端口、重试和导出。
 
 ## 桌面端打包
 
@@ -394,22 +407,41 @@ yarn dist:linux
 | `POST /api/production/workflow/runStep` | 统一启动一个生产步骤 |
 | `POST /api/production/workflow/generateDerivedAssets` | 创建并关联衍生资产 |
 
+商品视觉工厂 v2 API（全部为 `POST`）如下：
+
+| 接口 | 用途 |
+| --- | --- |
+| `/api/productFactory/workspace/get`、`/update` | 读取或保存品牌、默认参数、并发和模板配置 |
+| `/api/productFactory/products/list`、`/get`、`/upsert`、`/import`、`/delete` | SKU 摘要分页、单 SKU 详情、新建/更新、CSV 导入和删除 |
+| `/api/productFactory/references/upload`、`/setPrimary`、`/delete` | 上传商品/品牌参考图、设置主参考和删除参考图 |
+| `/api/productFactory/workflow/get`、`/update` | 读取或保存 Graph v2；更新使用 `baseRevision` 检测冲突 |
+| `/api/productFactory/workflow/saveTemplate`、`/syncTemplate`、`/templatePreview`、`/templateApply` | 保存项目模板、同步模板修订、预览差异和应用模板 |
+| `/api/productFactory/prompts/preview`、`/polish`、`/saveOverride`、`/reset`、`/upgrade` | 节点提示词编译、润色、覆盖、恢复和模板升级 |
+| `/api/productFactory/review/submit` | 提交图片候选审核，并保存视频端口输入绑定 |
+| `/api/productFactory/jobs/preview`、`/start` | 预览并确认单节点、下游或跨 SKU 批量任务；`start` 要求 `confirmed: true` |
+| `/api/productFactory/jobs/progress`、`/resume`、`/retry`、`/cancelQueued` | 查询任务进度、恢复中断、重试失败和取消排队任务 |
+| `/api/productFactory/models/list` | 获取图片/视频模型及参考图能力元数据 |
+| `/api/productFactory/export/create` | 导出已批准图片、成功视频和 `manifest.csv` ZIP |
+| `/api/productFactory/migration/importLegacy` | 幂等迁移旧 `product-promo` 项目及可定位的历史媒体 |
+
 请求需要先登录并携带有效 Token。接口字段、状态结构和调用示例见 [二次开发流程接口说明](./docs/secondary-development-workflow.md)。
 
 ## 数据与升级注意事项
 
 - `data/db2.sqlite` 保存本地业务数据，调试和测试前请先备份。
 - `data/oss` 保存图片、视频和缩略图等生成素材。
+- 商品视觉工厂的 SKU、参考图、Graph v2、任务和产物保存在 `o_productFactoryConfig`、`o_productFactoryItem`、`o_productFactoryReference`、`o_productFactoryWorkflow`、`o_productFactoryJob` 和 `o_productFactoryArtifact` 表中。
 - Electron 安装版会把运行数据复制到应用用户数据目录，源码目录不一定是实际数据目录。
 - 不要手工编辑 `data/serve/app.js`；它应由 `yarn build` 从 TypeScript 源码生成。
 - 不要把 API Key、Token、真实数据库或生成素材提交到公开仓库。
-- 更新内置前端时应重新验证分镜表页面、宣传片路由、侧边栏入口和 Electron `file://` 模式。
+- 更新内置前端时应重新验证分镜表页面、`/#/product-factory` 路由、旧 `/#/product-promo` 迁移、侧边栏入口和 Electron `file://` 模式。
 - 模型供应商对参考图数量、时长、分辨率和音频参数的支持不同，提交前会按模型详情进行校验。
 
 ## 当前边界
 
 - 内置 Web 前端是构建产物，注入式二开对原页面 DOM 和路由结构存在依赖。
-- 宣传片工作区目前只生成单条视频，不负责多片段剪辑与字幕包装。
+- 商品视觉工厂 v2 面向本地单用户生产，当前以节点生成图片和单条视频资产为主，不负责多片段剪辑、字幕合成或独立音轨混音。
+- 旧版 `product-promo` 画布只作为迁移入口；迁移依赖旧本地存储或仍可定位的历史媒体，无法定位的原始文件不会被凭空恢复。
 - AI 生成结果受模型、提示词、服务可用性和供应商限制影响，不能保证每次输出一致。
 - 本项目默认以本地单机工作流为主，不等同于多租户生产平台。
 - 计划文档用于记录设计与修复过程；功能状态应以当前代码、路由和测试结果为准。

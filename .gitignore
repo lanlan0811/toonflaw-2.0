@@ -62,3 +62,7 @@ version.txt
 # lical project AI-model-test&shot-list
 data/ai-model-test/*
 data/shot-list/*
+
+# local-ai-model
+data/vendor/clmm-mall-image.ts
+data/vendor/clmm-mall-video.ts

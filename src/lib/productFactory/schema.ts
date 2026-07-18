@@ -22,6 +22,8 @@ export default async function ensureProductFactorySchema(knex: Knex) {
     table.integer("imageConcurrency").notNullable().defaultTo(2);
     table.integer("videoConcurrency").notNullable().defaultTo(1);
     table.integer("migrationVersion").notNullable().defaultTo(0);
+    table.text("defaultTemplateGraph");
+    table.integer("templateRevision").notNullable().defaultTo(1);
     table.integer("createTime").notNullable();
     table.integer("updateTime").notNullable();
   });
@@ -67,6 +69,9 @@ export default async function ensureProductFactorySchema(knex: Knex) {
     table.integer("productId").notNullable();
     table.integer("version").notNullable().defaultTo(1);
     table.integer("customized").notNullable().defaultTo(0);
+    table.integer("revision").notNullable().defaultTo(1);
+    table.integer("templateRevision").notNullable().defaultTo(1);
+    table.text("v1Backup");
     table.text("graphData").notNullable();
     table.integer("createTime").notNullable();
     table.integer("updateTime").notNullable();
@@ -78,6 +83,8 @@ export default async function ensureProductFactorySchema(knex: Knex) {
     table.integer("projectId").notNullable();
     table.integer("productId").notNullable();
     table.integer("jobId");
+    table.string("workflowNodeId");
+    table.integer("detached").notNullable().defaultTo(0);
     table.string("mediaType").notNullable();
     table.string("slotKey").notNullable();
     table.string("aspectRatio").notNullable();
@@ -108,6 +115,8 @@ export default async function ensureProductFactorySchema(knex: Knex) {
     table.integer("projectId").notNullable();
     table.integer("productId").notNullable();
     table.integer("artifactId");
+    table.string("workflowNodeId");
+    table.text("dependsOnJobIds");
     table.string("phase").notNullable();
     table.string("slotKey").notNullable();
     table.string("aspectRatio").notNullable();
@@ -130,6 +139,15 @@ export default async function ensureProductFactorySchema(knex: Knex) {
   await addColumnIfMissing(knex, "o_productFactoryArtifact", "inputChanged", (table) => {
     table.integer("inputChanged").notNullable().defaultTo(0);
   });
+  await addColumnIfMissing(knex, "o_productFactoryConfig", "defaultTemplateGraph", (table) => table.text("defaultTemplateGraph"));
+  await addColumnIfMissing(knex, "o_productFactoryConfig", "templateRevision", (table) => table.integer("templateRevision").notNullable().defaultTo(1));
+  await addColumnIfMissing(knex, "o_productFactoryWorkflow", "revision", (table) => table.integer("revision").notNullable().defaultTo(1));
+  await addColumnIfMissing(knex, "o_productFactoryWorkflow", "templateRevision", (table) => table.integer("templateRevision").notNullable().defaultTo(1));
+  await addColumnIfMissing(knex, "o_productFactoryWorkflow", "v1Backup", (table) => table.text("v1Backup"));
+  await addColumnIfMissing(knex, "o_productFactoryArtifact", "workflowNodeId", (table) => table.string("workflowNodeId"));
+  await addColumnIfMissing(knex, "o_productFactoryArtifact", "detached", (table) => table.integer("detached").notNullable().defaultTo(0));
+  await addColumnIfMissing(knex, "o_productFactoryJob", "workflowNodeId", (table) => table.string("workflowNodeId"));
+  await addColumnIfMissing(knex, "o_productFactoryJob", "dependsOnJobIds", (table) => table.text("dependsOnJobIds"));
 
   const timestamp = Date.now();
   await knex("o_productFactoryJob").where("state", "running").update({

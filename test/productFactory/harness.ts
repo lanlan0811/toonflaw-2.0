@@ -48,6 +48,7 @@ export async function createProductFactoryHarness() {
   await knex.schema.createTable("o_image", (table) => {
     table.increments("id");
     table.text("filePath");
+    table.integer("assetsId");
     table.text("model");
   });
   await knex.schema.createTable("o_video", (table) => {

@@ -6,4 +6,5 @@ export default createProductFactoryRoute(async (req) => submitProductFactoryRevi
   requiredId(req.body.productId, "商品 ID"),
   Array.isArray(req.body.selections) ? req.body.selections : [],
   req.body.reviewMappings,
+  req.body.reviewBindings,
 ));

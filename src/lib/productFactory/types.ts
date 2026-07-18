@@ -1,6 +1,7 @@
 export const PRODUCT_FACTORY_MARKER = "__TOONFLOW_PRODUCT_FACTORY_V1__";
 export const LEGACY_PROMO_MARKER = "__TOONFLOW_PRODUCT_PROMO_V1__";
-export const PRODUCT_FACTORY_SCHEMA_VERSION = 1;
+export const PRODUCT_FACTORY_SCHEMA_VERSION = 2;
+export const PRODUCT_FACTORY_GRAPH_VERSION = 2;
 export const PRODUCT_PROMPT_TEMPLATE_VERSION = 2;
 
 export const IMAGE_SLOTS = ["main_clean", "scene_studio", "scene_lifestyle", "scene_detail"] as const;
@@ -34,20 +35,52 @@ export interface ProductFactoryPack {
   videoAudio: boolean;
 }
 
+export type ProductFactoryNodeType = "source" | "image" | "review" | "video" | "group" | "note";
+export type ProductFactoryPortKind = "reference" | "image" | "review" | "video";
+
+export interface ProductFactoryGraphPort {
+  id: string;
+  label: string;
+  kind: ProductFactoryPortKind;
+  required?: boolean;
+  multiple?: boolean;
+}
+
 export interface ProductFactoryGraphNode {
   id: string;
-  type: "source" | "image" | "review" | "video";
+  type: ProductFactoryNodeType;
   position: { x: number; y: number };
-  data: Record<string, unknown>;
+  data: Record<string, unknown> & {
+    label?: string;
+    outputKey?: string;
+    roleKey?: string;
+    modelOverride?: string | null;
+    runtime?: Record<string, unknown>;
+    inputs?: ProductFactoryGraphPort[];
+    outputs?: ProductFactoryGraphPort[];
+    system?: boolean;
+  };
 }
+
+export interface ProductFactoryGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourcePort?: string;
+  targetPort?: string;
+}
+
+export type ProductFactoryReviewBindings = Record<string, Record<string, number | number[] | null>>;
 
 export interface ProductFactoryGraph {
   version: number;
   productId: number;
   customized: boolean;
   nodes: ProductFactoryGraphNode[];
-  edges: { id: string; source: string; target: string }[];
+  edges: ProductFactoryGraphEdge[];
+  /** @deprecated v1 compatibility. Canonical v2 data lives in reviewBindings. */
   reviewMappings: Record<string, number | null>;
+  reviewBindings: ProductFactoryReviewBindings;
   viewport: { x: number; y: number; zoom: number };
 }
 

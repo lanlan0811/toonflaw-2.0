@@ -12,6 +12,10 @@ test("商品工厂表可幂等创建且启动恢复不会自动重跑任务", as
       assert.equal(await knex.schema.hasTable(table), true);
     }
     assert.equal(await knex.schema.hasColumn("o_productFactoryArtifact", "inputChanged"), true);
+    assert.equal(await knex.schema.hasColumn("o_productFactoryWorkflow", "revision"), true);
+    assert.equal(await knex.schema.hasColumn("o_productFactoryWorkflow", "v1Backup"), true);
+    assert.equal(await knex.schema.hasColumn("o_productFactoryArtifact", "workflowNodeId"), true);
+    assert.equal(await knex.schema.hasColumn("o_productFactoryJob", "dependsOnJobIds"), true);
     const base = {
       projectId: 1,
       productId: 1,

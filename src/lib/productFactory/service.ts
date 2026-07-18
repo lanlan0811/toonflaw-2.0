@@ -4,6 +4,7 @@ import { compileProductPrompt, promptInputSignature, type PromptCompileInput } f
 import {
   DEFAULT_PRODUCT_FACTORY_PACK,
   LEGACY_PROMO_MARKER,
+  PRODUCT_FACTORY_GRAPH_VERSION,
   PRODUCT_FACTORY_MARKER,
   safeJsonParse,
   type ProductFactoryGraph,
@@ -12,7 +13,13 @@ import {
   type ProductFactoryPromptSections,
   type PromptLanguage,
 } from "@/lib/productFactory/types";
-import { createDefaultProductWorkflow, normalizeFactoryPack, validateProductWorkflow } from "@/lib/productFactory/workflow";
+import {
+  createDefaultProductWorkflow,
+  diffProductFactoryGraphs,
+  migrateProductFactoryGraph,
+  normalizeFactoryPack,
+  validateProductWorkflow,
+} from "@/lib/productFactory/workflow";
 
 export interface ProductFactoryConfigInput {
   brandName?: string | null;
@@ -41,6 +48,7 @@ export interface ProductFactoryPromptRequest {
   mediaType: "image" | "video";
   slotKey: string;
   aspectRatio: string;
+  nodeId?: string;
   overrides?: Partial<ProductFactoryPromptSections>;
   runtime?: { mode?: string | string[]; duration?: number; resolution?: string; audio?: boolean };
 }
@@ -128,13 +136,20 @@ export async function ensureProductFactoryConfig(projectId: number) {
       imageConcurrency: 2,
       videoConcurrency: 1,
       migrationVersion: 0,
+      defaultTemplateGraph: JSON.stringify(createDefaultProductWorkflow(0)),
+      templateRevision: 1,
       createTime: timestamp,
       updateTime: timestamp,
     });
     config = await u.db("o_productFactoryConfig").where("projectId", projectId).first();
   }
   if (!config) throw new Error("商品视觉工厂配置初始化失败");
-  return config;
+  if (!config.defaultTemplateGraph) {
+    const template = createDefaultProductWorkflow(0, safeJsonParse(config.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK));
+    await u.db("o_productFactoryConfig").where("projectId", projectId).update({ defaultTemplateGraph: JSON.stringify(template), templateRevision: 1, updateTime: Date.now() });
+    config = { ...config, defaultTemplateGraph: JSON.stringify(template), templateRevision: 1 };
+  }
+  return config as NonNullable<typeof config>;
 }
 
 export async function getProductFactoryModelMetadata(modelValue: string): Promise<ProductFactoryModelMetadata> {
@@ -181,6 +196,8 @@ export async function getProductFactoryWorkspace(projectId: number) {
       ...config,
       defaultPack: normalizeFactoryPack(safeJsonParse(config.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK)),
       promptPolicy: safeJsonParse(config.promptPolicy, defaultPromptPolicy),
+      defaultTemplateGraph: migrateProductFactoryGraph(safeJsonParse(config.defaultTemplateGraph, createDefaultProductWorkflow(0)), 0).graph,
+      templateRevision: Number(config.templateRevision || 1),
     },
     brandReferences: await Promise.all(brandReferenceRows.map(async (reference) => ({ ...reference, url: await u.oss.getFileUrl(reference.filePath) }))),
     aiPolishAvailable: Boolean(universalAi?.modelName),
@@ -212,20 +229,18 @@ export async function updateProductFactoryWorkspace(projectId: number, input: Pr
     videoConcurrency: input.videoConcurrency === undefined ? current.videoConcurrency : clampInt(input.videoConcurrency, 1, 2, 1),
     updateTime: Date.now(),
   };
-  const generationInputsChanged = ["brandName", "campaignBrief", "visualTone", "forbiddenContent", "defaultPack", "promptPolicy"]
+  const generationInputsChanged = ["brandName", "campaignBrief", "visualTone", "forbiddenContent", "promptPolicy"]
     .some((key) => String((current as any)[key] ?? "") !== String((patch as any)[key] ?? ""));
   await u.db("o_productFactoryConfig").where("projectId", projectId).update(patch);
   if (generationInputsChanged) await markProductFactoryArtifactsInputChanged(projectId);
 
   if (input.defaultPack !== undefined) {
-    const workflows = await u.db("o_productFactoryWorkflow").where({ projectId, customized: 0 }).select("productId");
-    for (const workflow of workflows) {
-      await u.db("o_productFactoryWorkflow").where({ projectId, productId: workflow.productId }).update({
-        graphData: JSON.stringify(createDefaultProductWorkflow(Number(workflow.productId), safeJsonParse(patch.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK))),
-        version: 1,
-        updateTime: Date.now(),
-      });
-    }
+    const templateRevision = Number(current.templateRevision || 1) + 1;
+    await u.db("o_productFactoryConfig").where("projectId", projectId).update({
+      defaultTemplateGraph: JSON.stringify(createDefaultProductWorkflow(0, safeJsonParse(patch.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK))),
+      templateRevision,
+      updateTime: Date.now(),
+    });
   }
   return getProductFactoryWorkspace(projectId);
 }
@@ -240,16 +255,43 @@ export async function ensureProductWorkflow(projectId: number, productId: number
     await u.db("o_productFactoryWorkflow").insert({
       projectId,
       productId,
-      version: 1,
+      version: PRODUCT_FACTORY_GRAPH_VERSION,
       customized: 0,
       graphData: JSON.stringify(createDefaultProductWorkflow(productId, safeJsonParse(config.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK))),
+      revision: 1,
+      templateRevision: Number(config.templateRevision || 1),
+      v1Backup: null,
       createTime: timestamp,
       updateTime: timestamp,
     });
     workflow = await u.db("o_productFactoryWorkflow").where({ projectId, productId }).first();
   }
   if (!workflow) throw new Error("商品工作流初始化失败");
-  return { ...workflow, graph: safeJsonParse<ProductFactoryGraph>(workflow.graphData, createDefaultProductWorkflow(productId)) };
+  const rawGraph = safeJsonParse<ProductFactoryGraph>(workflow.graphData, createDefaultProductWorkflow(productId));
+  const migrated = migrateProductFactoryGraph(rawGraph, productId);
+  if (migrated.migrated || Number(workflow.version || 1) < PRODUCT_FACTORY_GRAPH_VERSION) {
+    await u.db("o_productFactoryWorkflow").where({ projectId, productId }).update({
+      version: PRODUCT_FACTORY_GRAPH_VERSION,
+      graphData: JSON.stringify(migrated.graph),
+      revision: Math.max(1, Number(workflow.revision || 1)),
+      v1Backup: workflow.v1Backup || workflow.graphData,
+      updateTime: Date.now(),
+    });
+    workflow = await u.db("o_productFactoryWorkflow").where({ projectId, productId }).first();
+  }
+  if (!workflow) throw new Error("商品工作流迁移失败");
+  const executable = migrated.graph.nodes.filter((node) => node.type === "image" || node.type === "video");
+  for (const node of executable) {
+    await u.db("o_productFactoryArtifact")
+      .where({ projectId, productId, mediaType: node.type, slotKey: String(node.data.slotKey || ""), aspectRatio: String(node.data.aspectRatio || "") })
+      .whereNull("workflowNodeId")
+      .update({ workflowNodeId: node.id });
+    await u.db("o_productFactoryJob")
+      .where({ projectId, productId, phase: node.type, slotKey: String(node.data.slotKey || ""), aspectRatio: String(node.data.aspectRatio || "") })
+      .whereNull("workflowNodeId")
+      .update({ workflowNodeId: node.id });
+  }
+  return { ...workflow, revision: Math.max(1, Number(workflow.revision || 1)), graph: migrated.graph };
 }
 
 export async function upsertProductFactoryItem(projectId: number, input: ProductFactoryItemInput) {
@@ -318,7 +360,7 @@ export async function getProductFactoryItem(projectId: number, productId: number
   };
 }
 
-export async function listProductFactoryItems(projectId: number, page = 1, pageSize = 50, search = "") {
+export async function listProductFactoryItems(projectId: number, page = 1, pageSize = 50, search = "", summary = false, state = "") {
   await ensureProductFactoryConfig(projectId);
   const limit = clampInt(pageSize, 1, 100, 50);
   const currentPage = Math.max(1, Math.round(Number(page) || 1));
@@ -330,11 +372,38 @@ export async function listProductFactoryItems(projectId: number, page = 1, pageS
     query = applySearch(query);
     countQuery = applySearch(countQuery);
   }
+  const normalizedState = normalizeString(state);
+  if (normalizedState && normalizedState !== "all") {
+    query = query.where("state", normalizedState);
+    countQuery = countQuery.where("state", normalizedState);
+  }
   const [rows, countRow] = await Promise.all([
     query.orderBy("id", "desc").limit(limit).offset((currentPage - 1) * limit),
     countQuery.count({ count: "id" }).first(),
   ]);
   const productIds = rows.map((row) => Number(row.id));
+  if (summary) {
+    const [references, artifactCounts] = productIds.length ? await Promise.all([
+      u.db("o_productFactoryReference").where("projectId", projectId).whereIn("productId", productIds).orderBy("isPrimary", "desc").orderBy("sortIndex", "asc"),
+      u.db("o_productFactoryArtifact").where("projectId", projectId).whereIn("productId", productIds).where("state", "success")
+        .select("productId", "mediaType").count({ count: "id" }).groupBy("productId", "mediaType"),
+    ]) : [[], []];
+    const referenceMap = new Map<number, any>();
+    for (const reference of references) if (!referenceMap.has(Number(reference.productId))) referenceMap.set(Number(reference.productId), reference);
+    const countMap = new Map<string, number>();
+    for (const count of artifactCounts) countMap.set(`${count.productId}:${count.mediaType}`, Number((count as any).count || 0));
+    const items = await Promise.all(rows.map(async (row) => {
+      const reference = referenceMap.get(Number(row.id));
+      return {
+        id: Number(row.id), sku: row.sku, name: row.name, category: row.category, state: row.state, updateTime: row.updateTime,
+        thumbnailUrl: reference?.filePath ? await u.oss.getFileUrl(reference.filePath) : null,
+        referenceCount: references.filter((candidate) => Number(candidate.productId) === Number(row.id)).length,
+        imageCount: countMap.get(`${row.id}:image`) || 0,
+        videoCount: countMap.get(`${row.id}:video`) || 0,
+      };
+    }));
+    return { items, page: currentPage, pageSize: limit, total: Number((countRow as any)?.count || 0), summary: true };
+  }
   let [references, artifacts, workflows] = productIds.length
     ? await Promise.all([
         u.db("o_productFactoryReference").where("projectId", projectId).whereIn("productId", productIds).orderBy("sortIndex", "asc"),
@@ -400,33 +469,292 @@ export async function deleteProductFactoryItems(projectId: number, productIds: n
   return { deleted: ids.length };
 }
 
-export async function updateProductWorkflow(projectId: number, productId: number, graph: ProductFactoryGraph, customized = true, markInputChanged = true) {
-  await ensureProductWorkflow(projectId, productId);
+export async function deleteProductFactoryProject(projectId: number, confirmationName: string) {
+  const project = await requireProductFactoryProject(projectId, true);
+  const confirmationToken = normalizeString(project.name) || `#${projectId}`;
+  if (normalizeString(confirmationName) !== confirmationToken) {
+    throw new Error(`请输入“${confirmationToken}”确认删除`);
+  }
+
+  const [references, artifacts] = await Promise.all([
+    u.db("o_productFactoryReference").where("projectId", projectId).select("filePath"),
+    u.db("o_productFactoryArtifact").where("projectId", projectId).select("filePath"),
+  ]);
+  const deleted = {
+    projects: 0,
+    products: 0,
+    references: 0,
+    workflows: 0,
+    artifacts: 0,
+    jobs: 0,
+    configs: 0,
+    ancillaryRecords: 0,
+    legacyRecords: 0,
+  };
+
+  await u.db.transaction(async (trx) => {
+    const tableCache = new Map<string, boolean>();
+    const hasTable = async (table: string) => {
+      if (!tableCache.has(table)) tableCache.set(table, await trx.schema.hasTable(table));
+      return tableCache.get(table)!;
+    };
+    const current = await trx("o_project").where("id", projectId).first();
+    if (!current) throw new Error("项目不存在或已被删除");
+    const isLegacy = normalizeString(current.intro).includes(LEGACY_PROMO_MARKER);
+    if (current.projectType !== ProjectTypes.commerce && !isLegacy) throw new Error("该项目不是商品视觉工厂项目");
+
+    deleted.jobs = await trx("o_productFactoryJob").where("projectId", projectId).delete();
+    deleted.artifacts = await trx("o_productFactoryArtifact").where("projectId", projectId).delete();
+    deleted.workflows = await trx("o_productFactoryWorkflow").where("projectId", projectId).delete();
+    deleted.references = await trx("o_productFactoryReference").where("projectId", projectId).delete();
+    deleted.products = await trx("o_productFactoryItem").where("projectId", projectId).delete();
+    deleted.configs = await trx("o_productFactoryConfig").where("projectId", projectId).delete();
+
+    if (await hasTable("o_novel")) {
+      const novelIds = (await trx("o_novel").where("projectId", projectId).select("id")).map((row) => Number(row.id));
+      if (novelIds.length && await hasTable("o_eventChapter")) {
+        const eventIds = [...new Set((await trx("o_eventChapter").whereIn("novelId", novelIds).select("eventId")).map((row) => Number(row.eventId)).filter(Boolean))];
+        deleted.legacyRecords += await trx("o_eventChapter").whereIn("novelId", novelIds).delete();
+        if (eventIds.length && await hasTable("o_event")) {
+          const retainedIds = new Set((await trx("o_eventChapter").whereIn("eventId", eventIds).select("eventId")).map((row) => Number(row.eventId)));
+          const orphanEventIds = eventIds.filter((id) => !retainedIds.has(id));
+          if (orphanEventIds.length) deleted.legacyRecords += await trx("o_event").whereIn("id", orphanEventIds).delete();
+        }
+      }
+      deleted.legacyRecords += await trx("o_novel").where("projectId", projectId).delete();
+    }
+
+    const scriptIds = await hasTable("o_script")
+      ? (await trx("o_script").where("projectId", projectId).select("id")).map((row) => Number(row.id))
+      : [];
+    const storyboardIds = await hasTable("o_storyboard")
+      ? (await trx("o_storyboard").where("projectId", projectId).select("id")).map((row) => Number(row.id))
+      : [];
+    const assetRows = await hasTable("o_assets")
+      ? await trx("o_assets").where("projectId", projectId).select("id", "imageId")
+      : [];
+    const assetIds = assetRows.map((row) => Number(row.id));
+    const imageIds = [...new Set(assetRows.map((row) => Number(row.imageId)).filter(Boolean))];
+
+    if (await hasTable("o_scriptAssets")) {
+      if (scriptIds.length) deleted.legacyRecords += await trx("o_scriptAssets").whereIn("scriptId", scriptIds).delete();
+      if (assetIds.length) deleted.legacyRecords += await trx("o_scriptAssets").whereIn("assetId", assetIds).delete();
+    }
+    if (await hasTable("o_assets2Storyboard")) {
+      if (storyboardIds.length) deleted.legacyRecords += await trx("o_assets2Storyboard").whereIn("storyboardId", storyboardIds).delete();
+      if (assetIds.length) deleted.legacyRecords += await trx("o_assets2Storyboard").whereIn("assetId", assetIds).delete();
+    }
+    if (assetIds.length && await hasTable("o_assetsRole2Audio")) {
+      deleted.legacyRecords += await trx("o_assetsRole2Audio").whereIn("assetsRoleId", assetIds).orWhereIn("assetsAudioId", assetIds).delete();
+    }
+    if (scriptIds.length) deleted.legacyRecords += await trx("o_script").whereIn("id", scriptIds).delete();
+    if (storyboardIds.length) deleted.legacyRecords += await trx("o_storyboard").whereIn("id", storyboardIds).delete();
+    if (assetIds.length) {
+      await trx("o_assets").whereIn("id", assetIds).update({ imageId: null });
+      deleted.legacyRecords += await trx("o_assets").whereIn("id", assetIds).delete();
+    }
+    if (await hasTable("o_image") && (assetIds.length || imageIds.length)) {
+      const imageQuery = trx("o_image");
+      if (assetIds.length) imageQuery.whereIn("assetsId", assetIds);
+      if (imageIds.length) assetIds.length ? imageQuery.orWhereIn("id", imageIds) : imageQuery.whereIn("id", imageIds);
+      deleted.legacyRecords += await imageQuery.delete();
+    }
+    for (const table of ["o_videoTrack", "o_video"]) {
+      if (await hasTable(table)) deleted.legacyRecords += await trx(table).where("projectId", projectId).delete();
+    }
+
+    for (const table of ["o_tasks", "o_agentWorkData", "o_workflowStepRun"]) {
+      if (await hasTable(table)) deleted.ancillaryRecords += await trx(table).where("projectId", projectId).delete();
+    }
+    if (await hasTable("memories")) {
+      deleted.ancillaryRecords += await trx("memories").where("isolationKey", "like", `${projectId}:%`).delete();
+    }
+    deleted.projects = await trx("o_project").where("id", projectId).delete();
+    if (deleted.projects !== 1) throw new Error("项目删除失败，请重试");
+  });
+
+  let deletedFiles = 0;
+  const storageWarnings: string[] = [];
+  const filePaths = [...new Set([...references, ...artifacts].map((row) => normalizeString(row.filePath)).filter(Boolean))];
+  for (const filePath of filePaths) {
+    try { await u.oss.deleteFile(filePath); deletedFiles += 1; } catch { /* directory sweep below handles missing files */ }
+  }
+  for (const directory of [`product-factory/${projectId}`, `${projectId}`]) {
+    try { await u.oss.deleteDirectory(directory); } catch (error) {
+      const message = u.error(error).message;
+      if (message && !/不存在|ENOENT|no such file/i.test(message)) storageWarnings.push(`${directory}: ${message}`);
+    }
+  }
+
+  return {
+    projectId,
+    projectName: confirmationToken,
+    deleted,
+    deletedFiles,
+    storageWarnings,
+  };
+}
+
+export async function updateProductWorkflow(
+  projectId: number,
+  productId: number,
+  graph: ProductFactoryGraph,
+  customized = true,
+  markInputChanged = true,
+  baseRevision?: number,
+) {
+  const current = await ensureProductWorkflow(projectId, productId);
+  const currentRevision = Number(current.revision || 1);
+  if (baseRevision !== undefined && Number(baseRevision) !== currentRevision) {
+    throw new Error(`工作流已在其他操作中更新（当前修订 ${currentRevision}），请刷新后重试`);
+  }
   if (Number(graph.productId) !== productId) throw new Error("工作流商品 ID 不匹配");
-  validateProductWorkflow(graph);
-  graph.customized = customized;
+  const migrated = migrateProductFactoryGraph(graph, productId).graph;
+  const previous = migrateProductFactoryGraph(current.graph, productId).graph;
+  for (const protectedNode of previous.nodes.filter((node) => node.data.system === true)) {
+    if (!migrated.nodes.some((node) => node.id === protectedNode.id && node.type === protectedNode.type)) throw new Error(`系统节点 ${protectedNode.data.label || protectedNode.id} 不能删除或替换`);
+  }
+  validateProductWorkflow(migrated);
+  migrated.customized = customized;
+  const diff = diffProductFactoryGraphs(previous, migrated);
+  const nextRevision = currentRevision + 1;
   await u.db("o_productFactoryWorkflow").where({ projectId, productId }).update({
-    graphData: JSON.stringify(graph),
+    graphData: JSON.stringify(migrated),
     customized: customized ? 1 : 0,
-    version: Math.max(1, Number(graph.version || 1)),
+    version: PRODUCT_FACTORY_GRAPH_VERSION,
+    revision: nextRevision,
     updateTime: Date.now(),
   });
-  if (markInputChanged) await markProductFactoryArtifactsInputChanged(projectId, [productId]);
+  if (diff.removedNodeIds.length) {
+    await u.db("o_productFactoryArtifact").where({ projectId, productId }).whereIn("workflowNodeId", diff.removedNodeIds).update({ detached: 1, updateTime: Date.now() });
+  }
+  if (markInputChanged && diff.affectedNodeIds.length) {
+    await u.db("o_productFactoryArtifact").where({ projectId, productId, state: "success", inputChanged: 0 }).whereIn("workflowNodeId", diff.affectedNodeIds).update({ inputChanged: 1, updateTime: Date.now() });
+  }
   return ensureProductWorkflow(projectId, productId);
 }
 
 export async function syncProductWorkflowTemplate(projectId: number, productId: number) {
   const config = await ensureProductFactoryConfig(projectId);
+  const current = await ensureProductWorkflow(projectId, productId);
   return updateProductWorkflow(
     projectId,
     productId,
     createDefaultProductWorkflow(productId, safeJsonParse(config.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK)),
     false,
+    true,
+    Number(current.revision || 1),
   );
 }
 
-export function findWorkflowPromptOverride(graph: ProductFactoryGraph, mediaType: "image" | "video", slotKey: string, aspectRatio: string) {
-  const node = graph.nodes.find((item) => item.type === mediaType && item.data.slotKey === slotKey && item.data.aspectRatio === aspectRatio);
+function instantiateTemplate(raw: unknown, productId: number, pack: ProductFactoryPack) {
+  const parsed = safeJsonParse<ProductFactoryGraph>(typeof raw === "string" ? raw : JSON.stringify(raw || {}), createDefaultProductWorkflow(productId, pack));
+  const graph = migrateProductFactoryGraph(parsed, productId, pack).graph;
+  graph.productId = productId;
+  return graph;
+}
+
+function mergeTemplateGraph(current: ProductFactoryGraph, template: ProductFactoryGraph, preserveCustom: boolean) {
+  if (!preserveCustom) return template;
+  const currentNodes = new Map(current.nodes.map((node) => [node.id, node]));
+  const templateIds = new Set(template.nodes.map((node) => node.id));
+  const nodes = template.nodes.map((node) => {
+    const existing = currentNodes.get(node.id);
+    if (!existing) return node;
+    const preservedData = Object.fromEntries(["label", "promptOverride", "promptCustomized", "modelOverride", "runtime"].map((key) => [key, existing.data[key]]).filter(([, value]) => value !== undefined));
+    return { ...node, position: { ...existing.position }, data: { ...node.data, ...preservedData } };
+  });
+  for (const node of current.nodes) if (!templateIds.has(node.id)) nodes.push(node);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edges = [...template.edges];
+  const edgeKeys = new Set(edges.map((edge) => `${edge.source}:${edge.sourcePort}>${edge.target}:${edge.targetPort}`));
+  for (const edge of current.edges) {
+    const touchesCustom = !templateIds.has(edge.source) || !templateIds.has(edge.target);
+    const key = `${edge.source}:${edge.sourcePort}>${edge.target}:${edge.targetPort}`;
+    if (touchesCustom && nodeIds.has(edge.source) && nodeIds.has(edge.target) && !edgeKeys.has(key)) { edges.push(edge); edgeKeys.add(key); }
+  }
+  return {
+    ...template,
+    nodes,
+    edges,
+    viewport: current.viewport,
+    reviewBindings: { ...template.reviewBindings, ...current.reviewBindings },
+    reviewMappings: { ...template.reviewMappings, ...current.reviewMappings },
+    customized: true,
+  };
+}
+
+export async function previewProductWorkflowTemplate(projectId: number, productIds: number[], preserveCustom = true) {
+  const config = await ensureProductFactoryConfig(projectId);
+  const ids = [...new Set(productIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  if (!ids.length) throw new Error("请选择至少一个 SKU");
+  const existing = await u.db("o_productFactoryItem").where("projectId", projectId).whereIn("id", ids).select("id");
+  if (existing.length !== ids.length) throw new Error("模板范围包含不存在的 SKU");
+  const pack = normalizeFactoryPack(safeJsonParse(config.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK));
+  const items = [];
+  for (const productId of ids) {
+    const workflow = await ensureProductWorkflow(projectId, productId);
+    const candidate = mergeTemplateGraph(workflow.graph, instantiateTemplate(config.defaultTemplateGraph, productId, pack), preserveCustom);
+    const diff = diffProductFactoryGraphs(workflow.graph, candidate);
+    const affectedArtifactsRow = diff.affectedNodeIds.length
+      ? await u.db("o_productFactoryArtifact").where({ projectId, productId, state: "success" }).whereIn("workflowNodeId", diff.affectedNodeIds).count({ count: "id" }).first()
+      : { count: 0 };
+    items.push({
+      productId,
+      revision: Number(workflow.revision || 1),
+      addedNodeIds: candidate.nodes.filter((node) => !workflow.graph.nodes.some((old) => old.id === node.id)).map((node) => node.id),
+      removedNodeIds: diff.removedNodeIds,
+      changedNodeIds: diff.semanticChangedNodeIds,
+      affectedNodeIds: diff.affectedNodeIds,
+      affectedArtifacts: Number((affectedArtifactsRow as any)?.count || 0),
+    });
+  }
+  return {
+    templateRevision: Number(config.templateRevision || 1),
+    preserveCustom,
+    items,
+    summary: {
+      skuCount: items.length,
+      addedNodes: items.reduce((sum, item) => sum + item.addedNodeIds.length, 0),
+      removedNodes: items.reduce((sum, item) => sum + item.removedNodeIds.length, 0),
+      changedNodes: items.reduce((sum, item) => sum + item.changedNodeIds.length, 0),
+      affectedArtifacts: items.reduce((sum, item) => sum + item.affectedArtifacts, 0),
+    },
+  };
+}
+
+export async function applyProductWorkflowTemplate(projectId: number, productIds: number[], preserveCustom = true, force = false, confirmed = false) {
+  if (force && !confirmed) throw new Error("强制覆盖必须在查看差异后再次确认");
+  const preview = await previewProductWorkflowTemplate(projectId, productIds, preserveCustom && !force);
+  const config = await ensureProductFactoryConfig(projectId);
+  const pack = normalizeFactoryPack(safeJsonParse(config.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK));
+  const workflows = [];
+  for (const item of preview.items) {
+    const current = await ensureProductWorkflow(projectId, item.productId);
+    const candidate = mergeTemplateGraph(current.graph, instantiateTemplate(config.defaultTemplateGraph, item.productId, pack), preserveCustom && !force);
+    const updated = await updateProductWorkflow(projectId, item.productId, candidate, preserveCustom && !force, true, Number(current.revision || 1));
+    await u.db("o_productFactoryWorkflow").where({ projectId, productId: item.productId }).update({ templateRevision: Number(config.templateRevision || 1) });
+    workflows.push(updated);
+  }
+  return { applied: workflows.length, templateRevision: Number(config.templateRevision || 1), preview, workflows };
+}
+
+export async function saveProductWorkflowAsTemplate(projectId: number, productId: number) {
+  const [config, workflow] = await Promise.all([ensureProductFactoryConfig(projectId), ensureProductWorkflow(projectId, productId)]);
+  const templateRevision = Number(config.templateRevision || 1) + 1;
+  const template = structuredClone(workflow.graph);
+  template.productId = 0;
+  template.viewport = { x: 30, y: 30, zoom: 0.75 };
+  template.reviewBindings = Object.fromEntries(Object.keys(template.reviewBindings || {}).map((nodeId) => [nodeId, { primary: null }]));
+  template.reviewMappings = Object.fromEntries(Object.keys(template.reviewMappings || {}).map((key) => [key, null]));
+  await u.db("o_productFactoryConfig").where("projectId", projectId).update({ defaultTemplateGraph: JSON.stringify(template), templateRevision, updateTime: Date.now() });
+  return { templateRevision, graph: template };
+}
+
+export function findWorkflowPromptOverride(graph: ProductFactoryGraph, mediaType: "image" | "video", slotKey: string, aspectRatio: string, nodeId?: string) {
+  const node = nodeId
+    ? graph.nodes.find((item) => item.id === nodeId && (item.type === "image" || item.type === "video"))
+    : graph.nodes.find((item) => item.type === mediaType && item.data.slotKey === slotKey && item.data.aspectRatio === aspectRatio);
   const value = node?.data.promptOverride;
   return value && typeof value === "object" ? value as Partial<ProductFactoryPromptSections> : undefined;
 }
@@ -437,23 +765,34 @@ export async function compilePromptForProduct(request: ProductFactoryPromptReque
   const item = await u.db("o_productFactoryItem").where({ projectId: request.projectId, id: request.productId }).first();
   if (!item) throw new Error("商品不存在");
   const workflow = await ensureProductWorkflow(request.projectId, request.productId);
+  const node = request.nodeId
+    ? workflow.graph.nodes.find((candidate) => candidate.id === request.nodeId && (candidate.type === "image" || candidate.type === "video"))
+    : workflow.graph.nodes.find((candidate) => candidate.type === request.mediaType && candidate.data.slotKey === request.slotKey && candidate.data.aspectRatio === request.aspectRatio);
+  if (!node || (node.type !== "image" && node.type !== "video")) throw new Error("未找到对应的工作流节点");
+  const mediaType = node.type;
+  const slotKey = String(node.data.slotKey || request.slotKey || "");
+  const aspectRatio = String(node.data.aspectRatio || request.aspectRatio || "");
+  if (!slotKey || !aspectRatio) throw new Error(`工作流节点 ${node.id} 缺少角色或比例`);
   const refs = await u.db("o_productFactoryReference").where({ projectId: request.projectId, productId: request.productId }).orderBy("isPrimary", "desc").orderBy("sortIndex", "asc");
   const brandRefs = await u.db("o_productFactoryReference").where({ projectId: request.projectId, scope: "brand" }).orderBy("sortIndex", "asc");
   const pack = normalizeFactoryPack(safeJsonParse(config.defaultPack, DEFAULT_PRODUCT_FACTORY_PACK));
-  const model = normalizeString(request.mediaType === "image" ? project.imageModel : project.videoModel);
-  if (!model || !/^[^:]+:.+$/.test(model)) throw new Error(`项目未配置有效的${request.mediaType === "image" ? "图片" : "视频"}模型`);
+  const modelOverride = normalizeString(node.data.modelOverride);
+  const model = modelOverride || normalizeString(mediaType === "image" ? project.imageModel : project.videoModel);
+  if (!model || !/^[^:]+:.+$/.test(model)) throw new Error(`项目未配置有效的${mediaType === "image" ? "图片" : "视频"}模型`);
   const metadata = await getProductFactoryModelMetadata(model);
-  const overrides = request.overrides || findWorkflowPromptOverride(workflow.graph, request.mediaType, request.slotKey, request.aspectRatio);
+  if (modelOverride && !metadata.raw) throw new Error(`节点覆盖模型 ${modelOverride} 已失效；请恢复项目默认模型或重新选择已有模型`);
+  const overrides = request.overrides || findWorkflowPromptOverride(workflow.graph, mediaType, slotKey, aspectRatio, node.id);
+  const runtime = node.data.runtime && typeof node.data.runtime === "object" ? node.data.runtime as Record<string, unknown> : {};
   const input: PromptCompileInput = {
-    mediaType: request.mediaType,
-    slotKey: request.slotKey as PromptCompileInput["slotKey"],
-    aspectRatio: request.aspectRatio,
+    mediaType,
+    slotKey: slotKey as PromptCompileInput["slotKey"],
+    aspectRatio,
     model,
-    size: pack.imageQuality,
-    mode: request.runtime?.mode ?? project.mode ?? undefined,
-    duration: request.runtime?.duration ?? pack.videoDuration,
-    resolution: request.runtime?.resolution ?? pack.videoResolution,
-    audio: request.runtime?.audio ?? pack.videoAudio,
+    size: (["1K", "2K", "4K"].includes(String(runtime.quality)) ? String(runtime.quality) : pack.imageQuality) as "1K" | "2K" | "4K",
+    mode: request.runtime?.mode ?? runtime.mode as string | string[] | undefined ?? project.mode ?? undefined,
+    duration: request.runtime?.duration ?? Number(runtime.duration || pack.videoDuration),
+    resolution: request.runtime?.resolution ?? String(runtime.resolution || pack.videoResolution),
+    audio: request.runtime?.audio ?? (runtime.audio === undefined ? pack.videoAudio : Boolean(runtime.audio)),
     brandName: config.brandName,
     campaignBrief: config.campaignBrief,
     visualTone: config.visualTone,
@@ -481,15 +820,19 @@ export async function compilePromptForProduct(request: ProductFactoryPromptReque
       references: refs.map((ref) => [ref.id, ref.sha256]),
       brandReferences: brandRefs.map((ref) => [ref.id, ref.sha256]),
       workflowVersion: workflow.version,
+      workflowNodeId: node.id,
     }),
     referenceIds: refs.map((ref) => Number(ref.id)),
     modelMetadata: metadata,
+    node,
   };
 }
 
 export async function saveProductPromptOverride(request: ProductFactoryPromptRequest, overrides: Partial<ProductFactoryPromptSections> | null) {
   const workflow = await ensureProductWorkflow(request.projectId, request.productId);
-  const node = workflow.graph.nodes.find((item) => item.type === request.mediaType && item.data.slotKey === request.slotKey && item.data.aspectRatio === request.aspectRatio);
+  const node = request.nodeId
+    ? workflow.graph.nodes.find((item) => item.id === request.nodeId && (item.type === "image" || item.type === "video"))
+    : workflow.graph.nodes.find((item) => item.type === request.mediaType && item.data.slotKey === request.slotKey && item.data.aspectRatio === request.aspectRatio);
   if (!node) throw new Error("未找到对应的工作流节点");
   node.data.promptOverride = overrides;
   node.data.promptCustomized = Boolean(overrides && Object.keys(overrides).length);
@@ -511,7 +854,12 @@ export async function refreshProductFactoryItemState(projectId: number, productI
     const images = artifacts.filter((artifact) => artifact.mediaType === "image" && artifact.state === "success");
     const approvedImages = images.filter((artifact) => artifact.approved);
     const currentImages = images.filter((artifact) => artifact.isCurrent);
-    const hasAllVideoMappings = Object.values(workflow.graph.reviewMappings || {}).every((id) => Number(id) > 0);
+    const videoNodes = workflow.graph.nodes.filter((node) => node.type === "video");
+    const hasAllVideoMappings = videoNodes.every((node) => {
+      const primary = workflow.graph.reviewBindings?.[node.id]?.primary;
+      const legacy = workflow.graph.reviewMappings?.[`${node.data.slotKey}:${node.data.aspectRatio}`];
+      return Number(Array.isArray(primary) ? primary[0] : primary ?? legacy) > 0;
+    });
     if (images.length && (currentImages.some((artifact) => !artifact.approved) || !approvedImages.length || !hasAllVideoMappings)) state = "awaiting_review";
     else if (approvedImages.length && hasAllVideoMappings) state = "video_ready";
     if (videoJobs.some((job) => job.state === "queued" || job.state === "running")) state = "video_generating";

@@ -2,6 +2,7 @@ import express from "express";
 import u from "@/utils";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
+import { serializeStoryboardImportListRow, type StoryboardImportListRow } from "@/lib/storyboardImportList";
 import { validateFields } from "@/middleware/middleware";
 
 const router = express.Router();
@@ -95,21 +96,9 @@ export default router.post(
       .count("o_storyboard.id as storyboardCount");
 
     const data = await Promise.all(
-      rows.map(async (item: { id?: number; index?: number; prompt?: string; duration?: string | number; state?: string; scriptId?: number; projectId?: number; track?: string; videoDesc?: string; shouldGenerateImage?: number; reason?: string; filePath?: string }) => ({
-        id: item.id,
-        index: item.index,
-        prompt: item.prompt,
-        duration: Number(item.duration ?? 0),
-        state: item.state,
-        scriptId: item.scriptId,
-        projectId: item.projectId,
-        track: item.track,
-        videoDesc: item.videoDesc,
-        shouldGenerateImage: item.shouldGenerateImage,
-        reason: item.reason,
-        src: item.filePath ? await u.oss.getSmallImageUrl(item.filePath) : "",
-        assets: relationMap[item.id!] ?? [],
-      })),
+      rows.map((item: StoryboardImportListRow) =>
+        serializeStoryboardImportListRow(item, relationMap[item.id!] ?? [], (filePath) => u.oss.getSmallImageUrl(filePath)),
+      ),
     );
 
     res.status(200).send(

@@ -40,6 +40,7 @@
   let newImportMode = false;
   let progressTimer = null;
   let listTimer = null;
+  let canvasOpen = false;
 
   function el(tag, attrs, children){
     const node = document.createElement(tag);
@@ -719,7 +720,7 @@
       const generateButton = generateImage && !success && !failed ? '<button class="tf-sd-btn tf-sd-mini primary" data-action="generate-image" data-id="'+r.id+'" '+(generating?'disabled':'')+'>'+(generating?'生成中':'生成分镜图')+'</button>' : '';
       const retryButton = generateImage && failed ? '<button class="tf-sd-btn tf-sd-mini primary" data-action="retry-image" data-id="'+r.id+'">失败重试</button>' : '';
       const forceButton = '<button class="tf-sd-btn tf-sd-mini warn" data-action="force-image" data-id="'+r.id+'" '+(generating?'disabled':'')+'>'+(generateImage?'强制重生':'强制生成')+'</button>';
-      return '<tr><td><input type="checkbox" data-action="toggle-one" data-id="'+r.id+'" '+checked+'></td><td>'+thumbnail+'</td><td><div class="tf-sm-shot-no">'+escapeHtml(r.index || (shot && shot[1]) || i+1)+'</div><div class="tf-sm-story-desc">'+escapeHtml(r.videoDesc || r.prompt || '')+'</div></td><td>'+escapeHtml(r.duration || '')+'</td><td>'+escapeHtml(r.track || '')+'</td><td>'+storyboardAssetMarkup(r.assets||[])+'</td><td><span class="tf-sd-chip '+stateClass+'">'+escapeHtml(r.state || '未生成')+'</span>'+reason+'</td><td><div class="tf-sm-row-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit" data-id="'+r.id+'">编辑关联</button>'+generateButton+retryButton+forceButton+'<button class="tf-sd-btn tf-sd-mini warn" data-action="delete" data-id="'+r.id+'">删除</button></div></td></tr>';
+      return '<tr><td><input type="checkbox" data-action="toggle-one" data-id="'+r.id+'" '+checked+'></td><td>'+thumbnail+'</td><td><div class="tf-sm-shot-no">'+escapeHtml(r.index || (shot && shot[1]) || i+1)+'</div><div class="tf-sm-story-desc">'+escapeHtml(r.videoDesc || r.prompt || '')+'</div></td><td>'+escapeHtml(r.duration || '')+'</td><td>'+escapeHtml(r.track || '')+'</td><td>'+storyboardAssetMarkup(r.assets||[])+'</td><td><span class="tf-sd-chip '+stateClass+'">'+escapeHtml(r.state || '未生成')+'</span>'+reason+'</td><td><div class="tf-sm-row-actions"><button class="tf-sd-btn tf-sd-mini" data-action="edit" data-id="'+r.id+'">编辑关联</button><button class="tf-sd-btn tf-sd-mini primary" data-action="edit-generate" data-id="'+r.id+'">编辑生成</button>'+generateButton+retryButton+forceButton+'<button class="tf-sd-btn tf-sd-mini warn" data-action="delete" data-id="'+r.id+'">删除</button></div></td></tr>';
     }).join('');
     box.innerHTML = toolbar + head + body + '</tbody></table>';
     bindStoryboardListActions(box);
@@ -731,6 +732,7 @@
         const action = node.getAttribute('data-action');
         const id = Number(node.getAttribute('data-id'));
         if (action === 'edit') openEditStoryboard(id);
+        if (action === 'edit-generate') openStoryboardCanvas(id);
         if (action === 'preview-storyboard') {
           const row = storyboardRows.find(function(item){ return item.id === id; });
           if (row) openImagePreview(row.src, '分镜 '+(row.index || row.id));
@@ -771,6 +773,45 @@
       await refreshStoryboardList();
       await refreshProgress('page');
     }catch(e){ window.$message ? window.$message.error(e.message) : alert(e.message); }
+  }
+
+  async function openStoryboardCanvas(id){
+    const row = storyboardRows.find(function(item){ return Number(item.id) === Number(id); });
+    if (!row) return;
+    if (!window.ToonflowStoryboardCanvas || typeof window.ToonflowStoryboardCanvas.open !== 'function') {
+      const message = '无限画布模块未加载，请刷新页面后重试';
+      window.$message ? window.$message.error(message) : alert(message);
+      return;
+    }
+    const assets = (row.assets || []).map(function(relationAsset){
+      return currentAssets.find(function(asset){ return Number(asset.id) === Number(relationAsset.id); }) || relationAsset;
+    });
+    canvasOpen = true;
+    let saved = false;
+    try {
+      await window.ToonflowStoryboardCanvas.open({
+        row: row,
+        assets: assets,
+        projectId: getProjectId(),
+        scriptId: Number(row.scriptId || getScriptId()),
+        post: post,
+        onSaved: async function(result){
+          saved = true;
+          row.flowId = result.flowId;
+          row.prompt = result.prompt;
+          row.src = result.url;
+          await refreshStoryboardList({preserveBatch:true,silent:true});
+          await refreshProgress('page',{silent:true});
+        },
+        onClose: function(){
+          canvasOpen = false;
+          if (!saved && isStoryboardRoute()) refreshStoryboardList({preserveBatch:true,silent:true});
+        }
+      });
+    } catch(e) {
+      canvasOpen = false;
+      window.$message ? window.$message.error(e.message) : alert(e.message);
+    }
   }
 
   function openEditStoryboard(id){
@@ -1138,9 +1179,9 @@
     refreshStoryboardList();
     refreshProgress('page');
     if (listTimer) clearInterval(listTimer);
-    listTimer = setInterval(function(){ if(isStoryboardRoute()) refreshStoryboardList({preserveBatch:true,silent:true}); }, 15000);
+    listTimer = setInterval(function(){ if(isStoryboardRoute() && !canvasOpen) refreshStoryboardList({preserveBatch:true,silent:true}); }, 15000);
     if (progressTimer) clearInterval(progressTimer);
-    progressTimer = setInterval(function(){ if(isStoryboardRoute()) refreshProgress('page',{silent:true}); }, 5000);
+    progressTimer = setInterval(function(){ if(isStoryboardRoute() && !canvasOpen) refreshProgress('page',{silent:true}); }, 5000);
   }
 
   function hookHistory(){

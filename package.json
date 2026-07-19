@@ -24,7 +24,7 @@
     "dev:gui-vite": "cross-env VITE_DEV=1 electronmon -r tsx scripts/main.ts",
     "start": "cross-env NODE_ENV=prod node data/serve/app.js",
     "lint": "tsc --noEmit",
-    "test:storyboard-import": "node --import tsx --test test/storyboardImport/assets.test.ts test/storyboardImport/parse.test.ts",
+    "test:storyboard-import": "node --import tsx --test test/storyboardImport/assets.test.ts test/storyboardImport/list.test.ts test/storyboardImport/parse.test.ts",
     "test:product-factory": "node --import ./test/productFactory/setup.cjs --import tsx --test test/productFactory/*.test.ts",
     "build": "cross-env NODE_ENV=prod tsx scripts/build.ts",
     "pack": "electron-builder --dir",

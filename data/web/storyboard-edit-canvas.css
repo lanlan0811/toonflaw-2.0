@@ -1,0 +1,87 @@
+body.tf-sic-open { overflow: hidden !important; }
+.tf-sic-root { position: fixed; inset: 0; z-index: 2147483000; display: flex; flex-direction: column; color: #172033; background: #f7f9fc; font: 14px/1.45 Inter, "PingFang SC", "Microsoft YaHei", sans-serif; }
+.tf-sic-root * { box-sizing: border-box; }
+.tf-sic-header { height: 64px; flex: 0 0 64px; display: grid; grid-template-columns: minmax(210px, 1fr) auto minmax(260px, 1fr); align-items: center; gap: 16px; padding: 0 18px; border-bottom: 1px solid #d9e0eb; background: rgba(255,255,255,.96); box-shadow: 0 4px 18px rgba(32,49,74,.07); }
+.tf-sic-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.tf-sic-title strong { font-size: 18px; }
+.tf-sic-title span { color: #7b8799; white-space: nowrap; }
+.tf-sic-toolbar, .tf-sic-actions { display: flex; align-items: center; gap: 7px; }
+.tf-sic-toolbar i { width: 1px; height: 24px; background: #dce2eb; margin: 0 3px; }
+.tf-sic-toolbar button, .tf-sic-actions button, .tf-sic-node button, .tf-sic-upload-button { min-height: 32px; padding: 5px 11px; border: 1px solid #d3dbe7; border-radius: 8px; color: #354158; background: #fff; cursor: pointer; font: inherit; transition: border-color .16s, color .16s, background .16s, transform .16s; }
+.tf-sic-toolbar button:hover, .tf-sic-actions button:hover, .tf-sic-node button:hover, .tf-sic-upload-button:hover { color: #1766d2; border-color: #7eb1f5; background: #f2f7ff; }
+.tf-sic-toolbar button:disabled, .tf-sic-actions button:disabled, .tf-sic-node button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+.tf-sic-actions { justify-content: flex-end; min-width: 0; }
+.tf-sic-actions > span { max-width: 240px; overflow: hidden; color: #758197; text-overflow: ellipsis; white-space: nowrap; }
+.tf-sic-actions > span.is-error { color: #c83e49; }
+.tf-sic-actions > span.is-success { color: #159663; }
+.tf-sic-actions > span.is-warning { color: #b37316; }
+.tf-sic-actions .primary, .tf-sic-node .primary { color: #fff; border-color: #176fe5; background: #176fe5; }
+.tf-sic-actions .primary:hover, .tf-sic-node .primary:hover { color: #fff; background: #0c5dc8; }
+.tf-sic-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; outline: none; cursor: grab; user-select: none; }
+.tf-sic-stage.is-panning { cursor: grabbing; }
+.tf-sic-grid { position: absolute; inset: 0; background-color: #fbfcfe; background-image: radial-gradient(circle, #c5cedc 1px, transparent 1.2px); background-size: 20px 20px; }
+.tf-sic-world { position: absolute; left: 0; top: 0; width: 8000px; height: 6000px; transform-origin: 0 0; will-change: transform; }
+.tf-sic-edges { position: absolute; inset: 0; width: 8000px; height: 6000px; overflow: visible; pointer-events: none; }
+.tf-sic-edge { fill: none; stroke: #8093ae; stroke-width: 2.2; stroke-dasharray: 7 5; pointer-events: none; }
+.tf-sic-edge-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
+.tf-sic-edge-hit:hover + .tf-sic-edge, .tf-sic-edge-hit:hover { stroke: #e2505a; }
+.tf-sic-edges > path[data-edge-preview] { display: none; fill: none; stroke: #1e73df; stroke-width: 2.5; stroke-dasharray: 6 4; pointer-events: none; }
+.tf-sic-nodes { position: absolute; inset: 0; }
+.tf-sic-node { position: absolute; width: 320px; overflow: visible; border: 1px solid #cfd8e5; border-radius: 13px; background: #fff; box-shadow: 0 12px 34px rgba(30,48,77,.14); cursor: default; user-select: none; }
+.tf-sic-node-generated { width: 430px; }
+.tf-sic-node.is-final { border: 2px solid #1f73df; box-shadow: 0 14px 42px rgba(31,115,223,.2); }
+.tf-sic-node > header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-bottom: 1px solid #e6eaf0; border-radius: 12px 12px 0 0; background: #f7f9fc; cursor: move; }
+.tf-sic-node > header > div:first-child { min-width: 0; display: flex; flex-direction: column; }
+.tf-sic-node > header span { color: #748198; font-size: 11px; text-transform: uppercase; }
+.tf-sic-node > header strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.tf-sic-node > header button { min-height: 27px; padding: 2px 8px; font-size: 12px; }
+.tf-sic-node-head-actions { display: flex; align-items: center; gap: 5px; }
+.tf-sic-node-head-actions button.active { color: #fff; border-color: #1f73df; background: #1f73df; }
+.tf-sic-image { position: relative; height: 250px; overflow: hidden; display: grid; place-items: center; background: #eef2f7; }
+.tf-sic-image.generated { height: 250px; }
+.tf-sic-image img { width: 100%; height: 100%; display: block; object-fit: contain; background: #e9edf3; }
+.tf-sic-image.empty span { color: #8b96a8; text-align: center; }
+.tf-sic-image em { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; background: rgba(17,29,48,.66); font-style: normal; }
+.tf-sic-image em i { width: 24px; height: 24px; margin-bottom: 42px; position: absolute; border: 3px solid rgba(255,255,255,.35); border-top-color: #fff; border-radius: 50%; animation: tf-sic-spin .8s linear infinite; }
+@keyframes tf-sic-spin { to { transform: rotate(360deg); } }
+.tf-sic-node-state { padding: 9px 12px 0; color: #718096; font-size: 12px; }
+.tf-sic-node-error { margin: 8px 12px 0; padding: 7px 9px; border-radius: 7px; color: #b72f3a; background: #fff0f1; font-size: 12px; }
+.tf-sic-node > footer { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-top: 1px solid #edf0f5; }
+.tf-sic-node > footer span { margin-left: auto; color: #8490a2; font-size: 12px; }
+.tf-sic-upload-button { display: inline-flex; align-items: center; }
+.tf-sic-port { position: absolute; z-index: 4; width: 18px; min-height: 18px !important; height: 18px; padding: 0 !important; border: 3px solid #fff !important; border-radius: 50% !important; background: #647995 !important; box-shadow: 0 0 0 1px #647995; cursor: crosshair !important; }
+.tf-sic-port-in { left: -9px; top: 30px; }
+.tf-sic-port-out { right: -9px; top: 30px; }
+.tf-sic-root.is-connecting .tf-sic-port-in { background: #1b73e8 !important; box-shadow: 0 0 0 3px rgba(27,115,232,.2); }
+.tf-sic-ref-strip { min-height: 56px; display: flex; align-items: center; gap: 7px; padding: 8px 12px 4px; overflow-x: auto; }
+.tf-sic-ref-strip > span { flex: 0 0 auto; width: 54px; height: 42px; display: grid; grid-template-columns: 24px 1fr; align-items: center; gap: 3px; padding: 3px; overflow: hidden; border: 1px solid #d8e0ea; border-radius: 7px; background: #f7f9fc; }
+.tf-sic-ref-strip img { width: 24px; height: 32px; object-fit: cover; border-radius: 4px; }
+.tf-sic-ref-strip b { font-size: 10px; white-space: nowrap; }
+.tf-sic-ref-strip small { color: #8b96a8; }
+.tf-sic-prompt-label { display: flex; justify-content: space-between; padding: 5px 12px; color: #56647a; font-size: 12px; }
+.tf-sic-prompt-label b { color: #c93945; font-weight: 500; }
+.tf-sic-prompt { position: relative; min-height: 130px; max-height: 250px; margin: 0 12px 8px; padding: 10px; overflow-y: auto; border: 1px solid #d5dde8; border-radius: 8px; color: #27344a; background: #fff; outline: none; white-space: pre-wrap; user-select: text; }
+.tf-sic-prompt:empty::before { content: attr(data-placeholder); color: #9ba5b4; pointer-events: none; }
+.tf-sic-prompt:focus { border-color: #5599ef; box-shadow: 0 0 0 3px rgba(61,139,235,.12); }
+.tf-sic-prompt.invalid { border-color: #dc626b; }
+.tf-sic-mention { position: relative; display: inline-flex; align-items: center; margin: 0 2px; padding: 1px 5px; border-radius: 5px; color: #1266cf; background: #eaf3ff; font-weight: 600; cursor: help; }
+.tf-sic-mention.invalid { color: #bf333e; background: #ffecee; }
+.tf-sic-mention-preview { position: absolute; z-index: 12; left: 50%; bottom: calc(100% + 8px); width: 150px; display: none; padding: 7px; border: 1px solid #d2dbe7; border-radius: 9px; background: #fff; box-shadow: 0 10px 28px rgba(27,42,67,.2); transform: translateX(-50%); }
+.tf-sic-mention:hover .tf-sic-mention-preview { display: block; }
+.tf-sic-mention-preview img { width: 100%; height: 100px; object-fit: contain; border-radius: 5px; background: #eef1f5; }
+.tf-sic-mention-preview b { display: block; margin-top: 5px; color: #39465b; font-size: 11px; text-align: center; }
+.tf-sic-mention-menu { position: absolute; z-index: 20; left: 12px; right: 12px; display: none; max-height: 220px; overflow-y: auto; border: 1px solid #ccd7e5; border-radius: 9px; background: #fff; box-shadow: 0 12px 32px rgba(30,45,70,.2); }
+.tf-sic-mention-menu.open { display: block; }
+.tf-sic-mention-menu > button { width: 100%; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 0; text-align: left; }
+.tf-sic-mention-menu img, .tf-sic-mention-menu i { width: 38px; height: 38px; display: grid; place-items: center; object-fit: cover; border-radius: 6px; background: #eef2f6; }
+.tf-sic-mention-menu span { display: flex; flex-direction: column; }
+.tf-sic-mention-menu small { color: #8390a4; }
+.tf-sic-generate-controls { display: grid; grid-template-columns: 1fr 86px 78px; gap: 7px; padding: 0 12px 10px; }
+.tf-sic-generate-controls select { width: 100%; height: 34px; border: 1px solid #d4dce7; border-radius: 7px; color: #354158; background: #fff; }
+.tf-sic-help { position: absolute; left: 18px; bottom: 16px; padding: 7px 11px; border: 1px solid rgba(202,211,223,.85); border-radius: 8px; color: #68778e; background: rgba(255,255,255,.88); box-shadow: 0 4px 15px rgba(41,57,79,.08); pointer-events: none; }
+.tf-sic-load-error .tf-sic-stage::after { content: "画布加载失败，请关闭后重试"; position: absolute; inset: 0; display: grid; place-items: center; color: #bd3540; background: rgba(248,250,253,.88); font-size: 18px; }
+@media (max-width: 1180px) {
+  .tf-sic-header { grid-template-columns: auto 1fr auto; }
+  .tf-sic-title span, .tf-sic-actions > span { display: none; }
+  .tf-sic-toolbar { overflow-x: auto; }
+}

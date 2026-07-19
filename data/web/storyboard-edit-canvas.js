@@ -76,6 +76,7 @@
     this.connecting = null;
     this.dragging = null;
     this.panning = null;
+    this.selectedEdgeId = null;
     this.historyTimer = 0;
     this.listeners = [];
   }
@@ -108,8 +109,8 @@
       '</header>',
       '<main class="tf-sic-stage" tabindex="0">',
       '  <div class="tf-sic-grid"></div>',
-      '  <div class="tf-sic-world"><svg class="tf-sic-edges" aria-hidden="true"><g data-edge-list></g><path data-edge-preview></path></svg><div class="tf-sic-nodes" data-nodes></div></div>',
-      '  <div class="tf-sic-help">拖动画布平移 · 滚轮缩放 · 从右侧圆点拖到生成节点左侧圆点连线 · 双击连线删除</div>',
+      '  <div class="tf-sic-world"><svg class="tf-sic-edges" aria-hidden="true"><g data-edge-list></g><path data-edge-preview></path></svg><div class="tf-sic-nodes" data-nodes></div><svg class="tf-sic-edge-controls" aria-hidden="true"><g data-edge-controls></g></svg></div>',
+      '  <div class="tf-sic-help">拖动画布平移 · 滚轮缩放 · 从右侧圆点拖到生成节点左侧圆点连线 · 单击连线后点击中间的 × 断开连接（也可双击连线）</div>',
       '</main>'
     ].join("");
     document.body.appendChild(this.root);
@@ -118,6 +119,7 @@
     this.world = this.root.querySelector(".tf-sic-world");
     this.nodesLayer = this.root.querySelector("[data-nodes]");
     this.edgeList = this.root.querySelector("[data-edge-list]");
+    this.edgeControls = this.root.querySelector("[data-edge-controls]");
     this.edgePreview = this.root.querySelector("[data-edge-preview]");
     this.statusNode = this.root.querySelector("[data-status]");
     this.saveButton = this.root.querySelector('[data-command="save"]');
@@ -355,7 +357,14 @@
       });
     });
     this.listen(this.stage, "pointerdown", function (event) {
-      if (event.button !== 0 || event.target.closest(".tf-sic-node,.tf-sic-help")) return;
+      if (event.button !== 0 || event.target.closest("[data-edge-id],[data-edge-disconnect]")) return;
+      if (self.selectedEdgeId) {
+        self.selectedEdgeId = null;
+        self.updateEdgeSelection();
+      }
+    }, true);
+    this.listen(this.stage, "pointerdown", function (event) {
+      if (event.button !== 0 || event.target.closest(".tf-sic-node,.tf-sic-help,[data-edge-id],[data-edge-disconnect]")) return;
       self.panning = { x: event.clientX, y: event.clientY, viewport: clone(self.graph.viewport) };
       self.stage.setPointerCapture(event.pointerId);
       self.stage.classList.add("is-panning");
@@ -760,6 +769,14 @@
     this.commitHistory(); this.render();
   };
 
+  Editor.prototype.removeEdge = function (edgeId) {
+    if (!this.graph.edges.some(function (edge) { return edge.id === edgeId; })) return;
+    this.graph.edges = this.graph.edges.filter(function (edge) { return edge.id !== edgeId; });
+    this.selectedEdgeId = null;
+    this.commitHistory();
+    this.render();
+  };
+
   Editor.prototype.onConnectionMove = function (event) {
     if (!this.connecting) return;
     this.connecting.current = this.worldPoint(event.clientX, event.clientY);
@@ -786,26 +803,88 @@
     return { x: node.position.x + port.offsetLeft + port.offsetWidth / 2, y: node.position.y + port.offsetTop + port.offsetHeight / 2 };
   };
 
-  Editor.prototype.edgePath = function (source, target) {
+  Editor.prototype.edgeGeometry = function (source, target) {
     const bend = Math.max(70, Math.abs(target.x - source.x) * 0.45);
-    return "M" + source.x + " " + source.y + " C" + (source.x + bend) + " " + source.y + "," + (target.x - bend) + " " + target.y + "," + target.x + " " + target.y;
+    const control1 = { x: source.x + bend, y: source.y };
+    const control2 = { x: target.x - bend, y: target.y };
+    const t = 0.5;
+    const inverse = 1 - t;
+    return {
+      path: "M" + source.x + " " + source.y + " C" + control1.x + " " + control1.y + "," + control2.x + " " + control2.y + "," + target.x + " " + target.y,
+      midpoint: {
+        x: inverse * inverse * inverse * source.x + 3 * inverse * inverse * t * control1.x + 3 * inverse * t * t * control2.x + t * t * t * target.x,
+        y: inverse * inverse * inverse * source.y + 3 * inverse * inverse * t * control1.y + 3 * inverse * t * t * control2.y + t * t * t * target.y
+      }
+    };
+  };
+
+  Editor.prototype.edgePath = function (source, target) {
+    return this.edgeGeometry(source, target).path;
+  };
+
+  Editor.prototype.updateEdgeControlScale = function () {
+    if (!this.edgeControls) return;
+    const scale = 1 / Math.max(0.25, Math.min(2, Number(this.graph.viewport.zoom || 0.8)));
+    this.edgeControls.querySelectorAll("[data-edge-disconnect]").forEach(function (control) {
+      control.setAttribute("transform", "translate(" + control.getAttribute("data-edge-x") + " " + control.getAttribute("data-edge-y") + ") scale(" + scale + ")");
+    });
+  };
+
+  Editor.prototype.updateEdgeSelection = function () {
+    if (this.selectedEdgeId && !this.graph.edges.some(function (edge) { return edge.id === this.selectedEdgeId; }, this)) {
+      this.selectedEdgeId = null;
+    }
+    const selectedEdgeId = this.selectedEdgeId;
+    this.edgeList.querySelectorAll("[data-edge-group]").forEach(function (group) {
+      group.classList.toggle("is-selected", group.getAttribute("data-edge-group") === selectedEdgeId);
+    });
+    this.edgeControls.querySelectorAll("[data-edge-disconnect]").forEach(function (control) {
+      control.classList.toggle("is-selected", control.getAttribute("data-edge-disconnect") === selectedEdgeId);
+    });
   };
 
   Editor.prototype.renderEdges = function () {
-    if (!this.edgeList) return;
+    if (!this.edgeList || !this.edgeControls) return;
     const self = this;
-    this.edgeList.innerHTML = this.graph.edges.map(function (edge) {
+    const controls = [];
+    const edges = this.graph.edges.map(function (edge) {
       const source = self.portPoint(edge.source, "[data-port-out]");
       const target = self.portPoint(edge.target, "[data-port-in]");
-      const path = self.edgePath(source, target);
-      return '<path class="tf-sic-edge" d="' + path + '"></path><path class="tf-sic-edge-hit" data-edge-id="' + escapeHtml(edge.id) + '" d="' + path + '"></path>';
-    }).join("");
+      const geometry = self.edgeGeometry(source, target);
+      const edgeId = escapeHtml(edge.id);
+      controls.push('<g class="tf-sic-edge-disconnect" data-edge-disconnect="' + edgeId + '" data-edge-x="' + geometry.midpoint.x + '" data-edge-y="' + geometry.midpoint.y + '"><circle r="14"></circle><path d="M-5 -5L5 5M5 -5L-5 5"></path></g>');
+      return '<g class="tf-sic-edge-group" data-edge-group="' + edgeId + '"><path class="tf-sic-edge-hit" data-edge-id="' + edgeId + '" d="' + geometry.path + '"></path><path class="tf-sic-edge" d="' + geometry.path + '"></path></g>';
+    });
+    this.edgeList.innerHTML = edges.join("");
+    this.edgeControls.innerHTML = controls.join("");
     this.edgeList.querySelectorAll("[data-edge-id]").forEach(function (path) {
-      path.addEventListener("dblclick", function () {
-        self.graph.edges = self.graph.edges.filter(function (edge) { return edge.id !== path.getAttribute("data-edge-id"); });
-        self.commitHistory(); self.render();
+      path.addEventListener("pointerdown", function (event) {
+        event.stopPropagation();
+      });
+      path.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        self.selectedEdgeId = path.getAttribute("data-edge-id");
+        self.updateEdgeSelection();
+      });
+      path.addEventListener("dblclick", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        self.removeEdge(path.getAttribute("data-edge-id"));
       });
     });
+    this.edgeControls.querySelectorAll("[data-edge-disconnect]").forEach(function (control) {
+      control.addEventListener("pointerdown", function (event) {
+        event.stopPropagation();
+      });
+      control.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        self.removeEdge(control.getAttribute("data-edge-disconnect"));
+      });
+    });
+    this.updateEdgeSelection();
+    this.updateEdgeControlScale();
     if (this.connecting) {
       const source = this.portPoint(this.connecting.source, "[data-port-out]");
       this.edgePreview.setAttribute("d", this.edgePath(source, this.connecting.current));
@@ -819,6 +898,7 @@
     const viewport = this.graph.viewport;
     viewport.zoom = Math.max(0.25, Math.min(2, Number(viewport.zoom || 0.8)));
     this.world.style.transform = "translate(" + viewport.x + "px," + viewport.y + "px) scale(" + viewport.zoom + ")";
+    this.updateEdgeControlScale();
     const zoom = this.root.querySelector("[data-zoom]");
     if (zoom) zoom.textContent = Math.round(viewport.zoom * 100) + "%";
   };

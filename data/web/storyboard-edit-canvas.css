@@ -22,12 +22,20 @@ body.tf-sic-open { overflow: hidden !important; }
 .tf-sic-grid { position: absolute; inset: 0; background-color: #fbfcfe; background-image: radial-gradient(circle, #c5cedc 1px, transparent 1.2px); background-size: 20px 20px; }
 .tf-sic-world { position: absolute; left: 0; top: 0; width: 8000px; height: 6000px; transform-origin: 0 0; will-change: transform; }
 .tf-sic-edges { position: absolute; inset: 0; width: 8000px; height: 6000px; overflow: visible; pointer-events: none; }
-.tf-sic-edge { fill: none; stroke: #8093ae; stroke-width: 2.2; stroke-dasharray: 7 5; pointer-events: none; }
-.tf-sic-edge-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
-.tf-sic-edge-hit:hover + .tf-sic-edge, .tf-sic-edge-hit:hover { stroke: #e2505a; }
+.tf-sic-edge-controls { position: absolute; inset: 0; width: 8000px; height: 6000px; overflow: visible; pointer-events: none; }
+.tf-sic-edge { fill: none; stroke: #8093ae; stroke-width: 2.2; stroke-dasharray: 7 5; pointer-events: none; vector-effect: non-scaling-stroke; }
+.tf-sic-edge-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; vector-effect: non-scaling-stroke; }
+.tf-sic-edge-hit:hover + .tf-sic-edge { stroke: #e2505a; }
+.tf-sic-edge-group.is-selected .tf-sic-edge { stroke: #e04752; stroke-width: 3.5; stroke-dasharray: none; filter: drop-shadow(0 0 4px rgba(224,71,82,.38)); }
+.tf-sic-edge-disconnect { display: none; pointer-events: all; cursor: pointer; }
+.tf-sic-edge-disconnect.is-selected { display: block; }
+.tf-sic-edge-disconnect circle { fill: #fff; stroke: #df3f4b; stroke-width: 2; filter: drop-shadow(0 2px 5px rgba(109,32,38,.28)); }
+.tf-sic-edge-disconnect path { fill: none; stroke: #df3f4b; stroke-width: 2.5; stroke-linecap: round; pointer-events: none; }
+.tf-sic-edge-disconnect:hover circle { fill: #df3f4b; }
+.tf-sic-edge-disconnect:hover path { stroke: #fff; }
 .tf-sic-edges > path[data-edge-preview] { display: none; fill: none; stroke: #1e73df; stroke-width: 2.5; stroke-dasharray: 6 4; pointer-events: none; }
-.tf-sic-nodes { position: absolute; inset: 0; }
-.tf-sic-node { position: absolute; width: 320px; overflow: visible; border: 1px solid #cfd8e5; border-radius: 13px; background: #fff; box-shadow: 0 12px 34px rgba(30,48,77,.14); cursor: default; user-select: none; }
+.tf-sic-nodes { position: absolute; inset: 0; pointer-events: none; }
+.tf-sic-node { position: absolute; width: 320px; overflow: visible; border: 1px solid #cfd8e5; border-radius: 13px; background: #fff; box-shadow: 0 12px 34px rgba(30,48,77,.14); cursor: default; pointer-events: auto; user-select: none; }
 .tf-sic-node-generated { width: 430px; }
 .tf-sic-node.is-final { border: 2px solid #1f73df; box-shadow: 0 14px 42px rgba(31,115,223,.2); }
 .tf-sic-node > header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-bottom: 1px solid #e6eaf0; border-radius: 12px 12px 0 0; background: #f7f9fc; cursor: move; }

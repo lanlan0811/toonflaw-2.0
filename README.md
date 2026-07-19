@@ -21,7 +21,7 @@
 >
 > 当前二次开发仓库：
 >
-> - [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/lanlan0811/toonflaw-2.0.git) <https://github.com/lanlan0811/toonflaw-2.0.git>
+> - [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/lanlan0811/toonflaw-2.0.git) <https://github.com/lanlan0811/toonflaw-2.0>
 > - [![Gitee](https://img.shields.io/badge/Gitee-C71D23?style=flat-square&logo=gitee&logoColor=white)](https://gitee.com/lan0811/toonflow-2.0) <https://gitee.com/lan0811/toonflow-2.0>
 > - [![GitCode](https://img.shields.io/badge/GitCode-FC5531?style=flat-square&logo=git&logoColor=white)](https://gitcode.com/lan0811/toonflow-2.0) <https://gitcode.com/lan0811/toonflow-2.0>
 

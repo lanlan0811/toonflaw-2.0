@@ -28,3 +28,7 @@
 - 修改代码前先执行 `git branch --show-current` 和 `git status --short`，确认位于本地 `master` 且了解现有改动。
 - 保留用户已有的未提交修改，不得擅自丢弃、覆盖或回滚。
 - 完成修改后按项目要求运行检查；用户要求提交或推送时，必须说明操作对象是本地 `master`、Gitee `origin/master`、GitHub `github/master` 还是 GitCode `gitcode/master`。
+
+## 计划文档
+
+- “套餐”计划必须完整、原封不动地写入 `.codex/pians` 目录，不得精简、改写、遗漏或仅保存摘要。

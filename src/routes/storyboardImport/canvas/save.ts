@@ -4,7 +4,7 @@ import u from "@/utils";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { normalizeProjectType, ProjectTypes } from "@/constants/project";
-import { assertNoUnpublishedDraftReference, normalizeCanvasGraph } from "@/lib/storyboardCanvas";
+import { assertNoUnpublishedDraftReference, normalizeCanvasGraph, persistCanvasAssetSelections } from "@/lib/storyboardCanvas";
 import { ensureExactRoleAssociations } from "@/lib/storyboardAssetAssociations";
 
 const router = express.Router();
@@ -76,43 +76,8 @@ export default router.post(
         }
         await trx("o_storyboard").where({ id: storyboardId, projectId, scriptId }).update(updateStoryboard);
 
-        const relations = await trx("o_assets2Storyboard").where("storyboardId", storyboardId).select("assetId");
-        const relationIds = new Set(relations.map((relation: any) => Number(relation.assetId)));
         const selections = req.body.assetSelections ?? [];
-        const unknownIds = selections.map((selection: any) => Number(selection.assetId)).filter((assetId: number) => !relationIds.has(assetId));
-        if (unknownIds.length) throw new Error(`画布包含未关联到当前分镜的资产：${[...new Set(unknownIds)].join(", ")}`);
-
-        for (const selection of selections) {
-          const asset = await trx("o_assets")
-            .join("o_scriptAssets", "o_scriptAssets.assetId", "o_assets.id")
-            .where({ "o_assets.id": selection.assetId, "o_assets.projectId": projectId, "o_scriptAssets.scriptId": scriptId })
-            .select("o_assets.revision")
-            .first();
-          if (!asset) throw new Error(`资产 ${selection.assetId} 不存在或已跨项目`);
-          const relationUpdate: Record<string, number> = { referenceEnabled: selection.referenceEnabled ? 1 : 0 };
-          if (selection.mode === "local") {
-            const filePath = u.replaceUrl(selection.filePath || "");
-            if (!filePath) throw new Error(`资产 ${selection.assetId} 的本分镜版本没有有效图片`);
-            if (!(await u.oss.fileExists(filePath))) throw new Error(`资产 ${selection.assetId} 的本分镜版本图片已不存在，请重新上传或选择版本`);
-            await trx("o_storyboardAssetOverride")
-              .insert({
-                storyboardId,
-                assetId: selection.assetId,
-                filePath,
-                describe: selection.describe ?? null,
-                prompt: selection.prompt ?? null,
-                sourceNodeId: selection.sourceNodeId ?? null,
-                baseAssetRevision: Number(selection.baseAssetRevision ?? asset.revision ?? 1),
-                updateTime: Date.now(),
-              })
-              .onConflict(["storyboardId", "assetId"])
-              .merge();
-          } else {
-            await trx("o_storyboardAssetOverride").where({ storyboardId, assetId: selection.assetId }).delete();
-            relationUpdate.assetRevision = Number(asset.revision ?? 1);
-          }
-          await trx("o_assets2Storyboard").where({ storyboardId, assetId: selection.assetId }).update(relationUpdate);
-        }
+        await persistCanvasAssetSelections(trx, { projectId, scriptId, storyboardId, selections });
         return { flowId };
       });
       res.status(200).send(success(result));

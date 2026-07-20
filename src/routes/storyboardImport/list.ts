@@ -142,11 +142,17 @@ export default router.post(
       "o_image.filePath",
     );
     const assetsWithSrc = await Promise.all(
-      projectAssets.map(async (item) => ({
-        ...item,
-        src: item.filePath ? await u.oss.getSmallImageUrl(item.filePath) : "",
-        originalSrc: item.filePath ? await u.oss.getFileUrl(item.filePath) : "",
-      })),
+      projectAssets.map(async (item) => {
+        const imageState = String(item.imageState ?? "").toLowerCase();
+        const imageCompleted = ["已完成", "生成成功", "success", "completed"].includes(imageState);
+        const validImage = Boolean(imageCompleted && item.filePath && (await u.oss.fileExists(item.filePath)));
+        return {
+          ...item,
+          validImage,
+          src: validImage ? await u.oss.getSmallImageUrl(item.filePath) : "",
+          originalSrc: validImage ? await u.oss.getFileUrl(item.filePath) : "",
+        };
+      }),
     );
     const scripts = await u
       .db("o_script")

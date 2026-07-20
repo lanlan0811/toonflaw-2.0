@@ -835,6 +835,7 @@
       await window.ToonflowStoryboardCanvas.open({
         row: row,
         assets: assets,
+        availableAssets: currentAssets,
         projectId: getProjectId(),
         scriptId: Number(row.scriptId || getScriptId()),
         post: post,

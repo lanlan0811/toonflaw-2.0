@@ -1,7 +1,7 @@
 (function () {
   if (window.ToonflowStoryboardCanvas) return;
 
-  const VERSION = 3;
+  const VERSION = 4;
   const NODE_WIDTH = { upload: 320, generated: 430 };
   const TYPE_ORDER = { role: 0, scene: 1, tool: 2 };
   const AUTO_PAN_THRESHOLD = 64;
@@ -80,6 +80,10 @@
     this.assets = (config.assets || []).slice().sort(function (a, b) {
       return (TYPE_ORDER[a.type] ?? 9) - (TYPE_ORDER[b.type] ?? 9) || String(a.name || "").localeCompare(String(b.name || ""));
     });
+    this.availableAssets = (config.availableAssets || config.assets || []).slice().sort(function (a, b) {
+      return (TYPE_ORDER[a.type] ?? 9) - (TYPE_ORDER[b.type] ?? 9) || String(a.name || "").localeCompare(String(b.name || ""));
+    });
+    this.initialAssetIds = new Set(this.assets.map(function (asset) { return Number(asset.id); }).filter(Boolean));
     this.projectId = Number(config.projectId || this.row.projectId || 0);
     this.scriptId = Number(config.scriptId || this.row.scriptId || 0);
     this.graph = { nodes: [], edges: [], viewport: { x: 80, y: 80, zoom: 0.8 }, suppressedAssetIds: [] };
@@ -98,6 +102,7 @@
     this.hasSavedViewport = false;
     this.autoPanFrame = 0;
     this.autoPanTime = 0;
+    this.assetPickerSelection = new Set();
   }
 
   Editor.prototype.listen = function (target, type, listener, options) {
@@ -116,7 +121,7 @@
       '    <button type="button" data-command="add-image">＋ 图片</button>',
       '    <button type="button" data-command="add-generated">＋ 生成节点</button>',
       '    <select data-new-asset-type title="新建资产类型"><option value="role">角色</option><option value="scene">场景</option><option value="tool">道具</option></select>',
-      '    <button type="button" data-command="add-asset">＋ 资产</button>',
+      '    <div class="tf-sic-asset-command"><button type="button" data-command="add-asset" aria-expanded="false">＋ 资产</button><div class="tf-sic-asset-action-menu" data-asset-action-menu><button type="button" data-asset-choice="existing"><b>选择已有资产</b><span>从当前批次已生成的资产中选择</span></button><button type="button" data-asset-choice="local"><b>新建画布资产</b><span>仅保存在当前分镜画布</span></button></div></div>',
       '    <i></i>',
       '    <button type="button" data-command="undo" title="撤销 Ctrl+Z">↶</button>',
       '    <button type="button" data-command="redo" title="重做 Ctrl+Y">↷</button>',
@@ -128,6 +133,26 @@
       '  </div>',
       '  <div class="tf-sic-actions"><span data-status>正在加载画布…</span><button type="button" class="primary" data-command="save" disabled>保存</button><button type="button" data-command="close">关闭</button></div>',
       '</header>',
+      '<div class="tf-sic-modal" data-asset-picker hidden>',
+      '  <section class="tf-sic-dialog tf-sic-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="tf-sic-picker-title">',
+      '    <header><div><strong id="tf-sic-picker-title">选择已有资产</strong><span data-picker-type-label></span></div><button type="button" data-modal-close="picker" aria-label="关闭">×</button></header>',
+      '    <div class="tf-sic-dialog-search"><input type="search" data-asset-search placeholder="搜索资产名称"></div>',
+      '    <div class="tf-sic-asset-picker-list" data-asset-picker-list></div>',
+      '    <footer><span data-asset-picker-count>已选择 0 项</span><button type="button" data-modal-close="picker">取消</button><button type="button" class="primary" data-add-selected-assets disabled>添加到画布</button></footer>',
+      '  </section>',
+      '</div>',
+      '<div class="tf-sic-modal" data-local-asset-dialog hidden>',
+      '  <section class="tf-sic-dialog tf-sic-local-dialog" role="dialog" aria-modal="true" aria-labelledby="tf-sic-local-title">',
+      '    <header><div><strong id="tf-sic-local-title">新建画布资产</strong><span data-local-type-label></span></div><button type="button" data-modal-close="local" aria-label="关闭">×</button></header>',
+      '    <div class="tf-sic-local-form">',
+      '      <label><span>资产名称<b>*</b></span><input type="text" data-local-asset-name maxlength="100" placeholder="请输入资产名称"></label>',
+      '      <label>资产描述<textarea data-local-asset-describe rows="3" placeholder="描述外观、材质或场景特征"></textarea></label>',
+      '      <label>图片提示词<textarea data-local-asset-prompt rows="4" placeholder="用于生成资产候选版本"></textarea></label>',
+      '      <div class="tf-sic-form-error" data-local-asset-error></div>',
+      '    </div>',
+      '    <footer><span>该资产不会写入正式资产库</span><button type="button" data-modal-close="local">取消</button><button type="button" class="primary" data-create-local-asset>创建资产</button></footer>',
+      '  </section>',
+      '</div>',
       '<main class="tf-sic-stage" tabindex="0">',
       '  <div class="tf-sic-grid"></div>',
       '  <svg class="tf-sic-edges" aria-hidden="true"><g data-edge-viewport><g data-edge-list></g><path data-edge-preview></path></g></svg>',
@@ -149,6 +174,9 @@
     this.edgePreview = this.root.querySelector("[data-edge-preview]");
     this.statusNode = this.root.querySelector("[data-status]");
     this.saveButton = this.root.querySelector('[data-command="save"]');
+    this.assetActionMenu = this.root.querySelector("[data-asset-action-menu]");
+    this.assetPicker = this.root.querySelector("[data-asset-picker]");
+    this.localAssetDialog = this.root.querySelector("[data-local-asset-dialog]");
     this.bindShell();
 
     try {
@@ -213,6 +241,7 @@
         globalDescribe: String(asset.describe || ""), globalPrompt: String(asset.prompt || ""),
         revision: Number(asset.revision || 1), baseAssetRevision: Number(local && local.baseAssetRevision || asset.revision || 1),
         referenceEnabled: asset.referenceEnabled !== 0, localSourceNodeId: local && local.sourceNodeId || "",
+        assetScope: "global", assetKind: asset.assetsId ? "derived" : "original", localAssetKey: "",
         overridden: !!local, custom: false, draftAsset: false, uploadBusy: false, error: ""
       }
     };
@@ -230,7 +259,8 @@
         assetVariant: !!data.assetVariant, targetAssetId: Number(data.targetAssetId || 0) || null,
         targetSourceNodeId: String(data.targetSourceNodeId || ""), targetAssetType: String(data.targetAssetType || ""),
         targetAssetName: String(data.targetAssetName || ""), assetDescribe: String(data.assetDescribe || ""),
-        draftAsset: !!data.draftAsset
+        assetScope: String(data.assetScope || ""), assetKind: String(data.assetKind || ""),
+        localAssetKey: String(data.localAssetKey || ""), draftAsset: !!data.draftAsset
       }
     };
   };
@@ -270,28 +300,40 @@
           data: data
         };
         if (node.type === "upload") {
+          const assetId = Number(data.assetId || 0) || null;
+          const legacyCanvasAsset = !assetId && !!data.assetType && !data.custom && !!data.draftAsset;
+          const assetScope = String(data.assetScope || (assetId ? "global" : legacyCanvasAsset ? "canvas" : ""));
           normalized.data = Object.assign({}, data, {
-            image: String(data.image || ""), originalImage: String(data.originalImage || ""), assetId: Number(data.assetId || 0) || null,
+            image: String(data.image || ""), originalImage: String(data.originalImage || ""), assetId: assetId,
             assetName: data.assetName || data.name || data.label || "自定义图片", assetType: data.assetType || "",
             assetDescribe: String(data.assetDescribe || ""), assetPrompt: String(data.assetPrompt || ""),
             globalDescribe: String(data.globalDescribe || ""), globalPrompt: String(data.globalPrompt || ""),
             revision: Number(data.revision || 1), baseAssetRevision: Number(data.baseAssetRevision || data.revision || 1),
             referenceEnabled: data.referenceEnabled !== false, localSourceNodeId: String(data.localSourceNodeId || ""),
+            assetScope: assetScope,
+            assetKind: String(data.assetKind || (assetScope === "canvas" ? "local" : "")),
+            localAssetKey: assetScope === "canvas" ? String(data.localAssetKey || normalized.id) : "",
             overridden: !!data.overridden, custom: data.custom !== false && !data.assetId,
-            draftAsset: !!data.draftAsset, uploadBusy: false, error: ""
+            draftAsset: false, uploadBusy: false, error: ""
           });
         } else {
           const incoming = rawEdges.filter(function (edge) { return String(edge.target) === String(normalized.id); }).sort(function (a, b) { return Number(a.order || 0) - Number(b.order || 0); }).map(function (edge) { return String(edge.source); });
+          const targetAssetId = Number(data.targetAssetId || 0) || null;
+          const legacyCanvasVariant = !!data.assetVariant && !targetAssetId && !!data.draftAsset;
+          const assetScope = String(data.assetScope || (targetAssetId ? "global" : legacyCanvasVariant ? "canvas" : ""));
           normalized.data = Object.assign({}, data, {
             generatedImage: String(data.generatedImage || data.image || ""),
             promptDoc: normalizePromptDoc(data.promptDoc, data.prompt || data.promptText || this.row.prompt || "", incoming),
             model: String(data.model || this.defaults.model || ""), quality: String(data.quality || this.defaults.quality || "2K"),
             ratio: String(data.ratio || this.defaults.ratio || "16:9"), isFinal: !!data.isFinal,
             references: Array.isArray(data.references) ? data.references : [], busy: false, error: "",
-            assetVariant: !!data.assetVariant, targetAssetId: Number(data.targetAssetId || 0) || null,
+            assetVariant: !!data.assetVariant, targetAssetId: targetAssetId,
             targetSourceNodeId: String(data.targetSourceNodeId || ""), targetAssetType: String(data.targetAssetType || ""),
             targetAssetName: String(data.targetAssetName || ""), assetDescribe: String(data.assetDescribe || ""),
-            draftAsset: !!data.draftAsset
+            assetScope: assetScope,
+            assetKind: String(data.assetKind || (assetScope === "canvas" ? "local" : "")),
+            localAssetKey: assetScope === "canvas" ? String(data.localAssetKey || data.targetSourceNodeId || normalized.id) : "",
+            draftAsset: false
           });
         }
         delete normalized.data.canvasMeta;
@@ -320,6 +362,7 @@
     const currentIds = new Set(this.assets.map(function (asset) { return Number(asset.id); }));
     graph.nodes.forEach(function (node) {
       if (node.type !== "upload") return;
+      if (node.data.assetScope === "canvas") return;
       let asset = this.assets.find(function (item) { return Number(item.id) === Number(node.data.assetId); });
       if (!asset) {
         const image = normalizeUrl(node.data.image);
@@ -338,6 +381,9 @@
         node.data.globalPrompt = String(asset.prompt || "");
         node.data.revision = Number(asset.revision || 1);
         node.data.referenceEnabled = asset.referenceEnabled !== 0;
+        node.data.assetScope = "global";
+        node.data.assetKind = asset.assetsId ? "derived" : "original";
+        node.data.localAssetKey = "";
         node.data.custom = false;
         node.data.draftAsset = false;
         if (local) {
@@ -376,6 +422,31 @@
 
   Editor.prototype.assetIdForNode = function (node) {
     return Number(node && (node.data.targetAssetId || node.data.assetId) || 0) || null;
+  };
+
+  Editor.prototype.assetIdentityForNode = function (node) {
+    const assetId = this.assetIdForNode(node);
+    if (assetId) return "global:" + assetId;
+    const localAssetKey = String(node && node.data && node.data.localAssetKey || "");
+    return localAssetKey ? "canvas:" + localAssetKey : "node:" + String(node && node.id || "");
+  };
+
+  Editor.prototype.connectAssetToFinal = function (source, graphValue) {
+    const graph = graphValue || this.graph;
+    const finalNode = graph.nodes.find(function (node) { return node.type === "generated" && !node.data.assetVariant && node.data.isFinal; });
+    if (!source || !finalNode || !this.imageForNode(source)) return false;
+    const identity = this.assetIdentityForNode(source);
+    const nodeMap = new Map(graph.nodes.map(function (node) { return [node.id, node]; }));
+    graph.edges = graph.edges.filter(function (edge) {
+      if (edge.target !== finalNode.id) return true;
+      const edgeSource = nodeMap.get(edge.source);
+      return this.assetIdentityForNode(edgeSource) !== identity || edge.source === source.id;
+    }, this);
+    if (!graph.edges.some(function (edge) { return edge.source === source.id && edge.target === finalNode.id; })) {
+      graph.edges.push({ id: uid("edge"), source: source.id, target: finalNode.id, order: graph.edges.filter(function (edge) { return edge.target === finalNode.id; }).length });
+    }
+    this.normalizeFinalReferenceOrder(graph);
+    return true;
   };
 
   Editor.prototype.normalizeFinalReferenceOrder = function (graphValue) {
@@ -441,6 +512,170 @@
     this.render();
   };
 
+  Editor.prototype.selectedAssetType = function () {
+    const field = this.root.querySelector("[data-new-asset-type]");
+    return String(field && field.value || "role");
+  };
+
+  Editor.prototype.assetTypeLabel = function (type) {
+    return { role: "角色", scene: "场景", tool: "道具" }[type] || "资产";
+  };
+
+  Editor.prototype.isGeneratedCatalogAsset = function (asset) {
+    const state = String(asset && asset.imageState || "").toLowerCase();
+    const completed = state === "已完成" || state === "生成成功" || state === "success" || state === "completed";
+    return !!asset && asset.validImage === true && completed && !!(asset.originalSrc || asset.src);
+  };
+
+  Editor.prototype.assetAlreadyOnCanvas = function (assetId) {
+    return this.graph.nodes.some(function (node) { return this.assetIdForNode(node) === Number(assetId); }, this);
+  };
+
+  Editor.prototype.closeAssetActionMenu = function () {
+    if (this.assetActionMenu) this.assetActionMenu.classList.remove("open");
+    const button = this.root.querySelector('[data-command="add-asset"]');
+    if (button) button.setAttribute("aria-expanded", "false");
+  };
+
+  Editor.prototype.toggleAssetActionMenu = function () {
+    if (!this.assetActionMenu) return;
+    const open = !this.assetActionMenu.classList.contains("open");
+    this.assetActionMenu.classList.toggle("open", open);
+    const button = this.root.querySelector('[data-command="add-asset"]');
+    if (button) button.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+
+  Editor.prototype.openAssetPicker = function () {
+    const type = this.selectedAssetType();
+    this.assetPickerSelection = new Set();
+    const search = this.assetPicker.querySelector("[data-asset-search]");
+    if (search) search.value = "";
+    this.assetPicker.querySelector("[data-picker-type-label]").textContent = this.assetTypeLabel(type) + " · 当前分镜表批次";
+    this.assetPicker.hidden = false;
+    this.renderAssetPicker();
+    requestAnimationFrame(function () { if (search) search.focus(); });
+  };
+
+  Editor.prototype.closeAssetPicker = function () {
+    if (this.assetPicker) this.assetPicker.hidden = true;
+    this.assetPickerSelection = new Set();
+  };
+
+  Editor.prototype.renderAssetPicker = function () {
+    if (!this.assetPicker || this.assetPicker.hidden) return;
+    const self = this;
+    const type = this.selectedAssetType();
+    const search = String(this.assetPicker.querySelector("[data-asset-search]").value || "").trim().toLowerCase();
+    const matches = this.availableAssets.filter(function (asset) {
+      return asset.type === type && self.isGeneratedCatalogAsset(asset) && (!search || String(asset.name || "").toLowerCase().includes(search));
+    });
+    const list = this.assetPicker.querySelector("[data-asset-picker-list]");
+    const renderSection = function (title, values, kind) {
+      if (!values.length) return "";
+      return '<section class="tf-sic-picker-section"><h3>' + title + '<span>' + values.length + '</span></h3><div class="tf-sic-picker-grid">' + values.map(function (asset) {
+        const assetId = Number(asset.id);
+        const exists = self.assetAlreadyOnCanvas(assetId);
+        const checked = self.assetPickerSelection.has(assetId);
+        const image = asset.originalSrc || asset.src;
+        return '<label class="tf-sic-picker-card ' + (exists ? "is-disabled" : "") + '"><input type="checkbox" data-picker-asset-id="' + assetId + '" ' + (checked ? "checked" : "") + ' ' + (exists ? "disabled" : "") + '><img src="' + escapeHtml(image) + '" alt=""><span class="tf-sic-picker-card-body"><b>' + escapeHtml(asset.name || "未命名资产") + '</b><small>' + escapeHtml(asset.describe || "暂无描述") + '</small><em class="' + kind + '">' + (kind === "derived" ? "衍生资产" : "原始资产") + '</em></span>' + (exists ? '<i>已在画布</i>' : "") + '</label>';
+      }).join("") + '</div></section>';
+    };
+    const original = matches.filter(function (asset) { return !asset.assetsId; });
+    const derived = matches.filter(function (asset) { return !!asset.assetsId; });
+    list.innerHTML = renderSection("原始资产", original, "original") + renderSection("衍生资产", derived, "derived") || '<div class="tf-sic-picker-empty">当前类型暂无可选择的已生成资产</div>';
+    list.querySelectorAll("[data-picker-asset-id]").forEach(function (checkbox) {
+      checkbox.addEventListener("change", function () {
+        const assetId = Number(checkbox.getAttribute("data-picker-asset-id"));
+        if (checkbox.checked) self.assetPickerSelection.add(assetId);
+        else self.assetPickerSelection.delete(assetId);
+        self.updateAssetPickerCount();
+      });
+    });
+    this.updateAssetPickerCount();
+  };
+
+  Editor.prototype.updateAssetPickerCount = function () {
+    if (!this.assetPicker) return;
+    const count = this.assetPickerSelection.size;
+    this.assetPicker.querySelector("[data-asset-picker-count]").textContent = "已选择 " + count + " 项";
+    this.assetPicker.querySelector("[data-add-selected-assets]").disabled = count <= 0;
+  };
+
+  Editor.prototype.addSelectedAssets = function () {
+    const selected = this.availableAssets.filter(function (asset) {
+      return this.assetPickerSelection.has(Number(asset.id)) && !this.assetAlreadyOnCanvas(Number(asset.id));
+    }, this);
+    if (!selected.length) { this.closeAssetPicker(); return; }
+    const point = this.centerPoint();
+    let connectedCount = 0;
+    selected.forEach(function (asset, index) {
+      const assetId = Number(asset.id);
+      let relationAsset = this.assets.find(function (item) { return Number(item.id) === assetId; });
+      if (!relationAsset) {
+        relationAsset = Object.assign({}, asset, { referenceEnabled: 1, localOverride: null });
+        this.assets.push(relationAsset);
+      }
+      this.graph.suppressedAssetIds = this.graph.suppressedAssetIds.filter(function (id) { return Number(id) !== assetId; });
+      const node = this.createAssetNode(relationAsset, {
+        x: point.x - 360 + index % 2 * 350,
+        y: point.y - 180 + Math.floor(index / 2) * 390
+      });
+      this.graph.nodes.push(node);
+      if (this.connectAssetToFinal(node)) connectedCount += 1;
+    }, this);
+    this.commitHistory();
+    this.closeAssetPicker();
+    this.render();
+    this.setStatus("已添加 " + selected.length + " 个资产" + (connectedCount ? "，并连接最终结果" : ""), "success");
+  };
+
+  Editor.prototype.openLocalAssetDialog = function () {
+    const type = this.selectedAssetType();
+    this.pendingLocalAssetType = type;
+    this.localAssetDialog.querySelector("[data-local-type-label]").textContent = this.assetTypeLabel(type) + " · 仅当前分镜";
+    this.localAssetDialog.querySelector("[data-local-asset-name]").value = "";
+    this.localAssetDialog.querySelector("[data-local-asset-describe]").value = "";
+    this.localAssetDialog.querySelector("[data-local-asset-prompt]").value = "";
+    this.localAssetDialog.querySelector("[data-local-asset-error]").textContent = "";
+    this.localAssetDialog.hidden = false;
+    const name = this.localAssetDialog.querySelector("[data-local-asset-name]");
+    requestAnimationFrame(function () { name.focus(); });
+  };
+
+  Editor.prototype.closeLocalAssetDialog = function () {
+    if (this.localAssetDialog) this.localAssetDialog.hidden = true;
+  };
+
+  Editor.prototype.createLocalAsset = function () {
+    const type = String(this.pendingLocalAssetType || this.selectedAssetType());
+    const nameField = this.localAssetDialog.querySelector("[data-local-asset-name]");
+    const name = String(nameField.value || "").trim();
+    const error = this.localAssetDialog.querySelector("[data-local-asset-error]");
+    if (!name) { error.textContent = "请输入资产名称"; nameField.focus(); return; }
+    const duplicate = this.graph.nodes.some(function (node) {
+      return node.type === "upload" && node.data.assetScope === "canvas" && node.data.assetType === type && String(node.data.assetName || "").trim() === name;
+    });
+    if (duplicate) { error.textContent = "当前画布已存在同类型同名的画布资产"; nameField.focus(); return; }
+    const describe = String(this.localAssetDialog.querySelector("[data-local-asset-describe]").value || "");
+    const prompt = String(this.localAssetDialog.querySelector("[data-local-asset-prompt]").value || "");
+    const point = this.centerPoint();
+    const nodeId = uid("canvas-asset");
+    this.graph.nodes.push({
+      id: nodeId, type: "upload", position: { x: point.x - 160, y: point.y - 200 },
+      data: {
+        image: "", originalImage: "", globalImage: "", assetId: null, assetName: name, assetType: type,
+        assetDescribe: describe, assetPrompt: prompt, globalDescribe: "", globalPrompt: "", revision: 1,
+        baseAssetRevision: 1, referenceEnabled: true, localSourceNodeId: nodeId, overridden: true,
+        assetScope: "canvas", assetKind: "local", localAssetKey: nodeId,
+        custom: false, draftAsset: false, uploadBusy: false, error: ""
+      }
+    });
+    this.commitHistory();
+    this.closeLocalAssetDialog();
+    this.render();
+    this.setStatus("画布资产已创建，可上传图片或生成版本", "success");
+  };
+
   Editor.prototype.bindShell = function () {
     const self = this;
     this.root.querySelectorAll("[data-command]").forEach(function (button) {
@@ -448,7 +683,7 @@
         const command = button.getAttribute("data-command");
         if (command === "add-image") self.addImageNode();
         if (command === "add-generated") self.addGeneratedNode();
-        if (command === "add-asset") self.addAssetDraft();
+        if (command === "add-asset") self.toggleAssetActionMenu();
         if (command === "undo") self.undo();
         if (command === "redo") self.redo();
         if (command === "layout") self.autoLayout();
@@ -458,6 +693,35 @@
         if (command === "save") self.save();
         if (command === "close") self.close(false);
       });
+    });
+    this.root.querySelectorAll("[data-asset-choice]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        self.closeAssetActionMenu();
+        if (button.getAttribute("data-asset-choice") === "existing") self.openAssetPicker();
+        else self.openLocalAssetDialog();
+      });
+    });
+    this.root.querySelectorAll("[data-modal-close]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        if (button.getAttribute("data-modal-close") === "picker") self.closeAssetPicker();
+        else self.closeLocalAssetDialog();
+      });
+    });
+    this.root.querySelector("[data-asset-search]").addEventListener("input", function () { self.renderAssetPicker(); });
+    this.root.querySelector("[data-add-selected-assets]").addEventListener("click", function () { self.addSelectedAssets(); });
+    this.root.querySelector("[data-create-local-asset]").addEventListener("click", function () { self.createLocalAsset(); });
+    this.root.querySelector("[data-local-asset-name]").addEventListener("keydown", function (event) {
+      if (event.key === "Enter") { event.preventDefault(); self.createLocalAsset(); }
+    });
+    [this.assetPicker, this.localAssetDialog].forEach(function (modal) {
+      modal.addEventListener("pointerdown", function (event) {
+        if (event.target !== modal) return;
+        if (modal === self.assetPicker) self.closeAssetPicker();
+        else self.closeLocalAssetDialog();
+      });
+    });
+    this.listen(this.root, "click", function (event) {
+      if (!event.target.closest(".tf-sic-asset-command")) self.closeAssetActionMenu();
     });
     this.listen(this.root, "click", function (event) {
       const target = event.target;
@@ -510,6 +774,9 @@
       if (control && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? self.redo() : self.undo(); }
       else if (control && event.key.toLowerCase() === "y") { event.preventDefault(); self.redo(); }
       else if (event.key === "Escape" && self.connecting) { event.preventDefault(); self.cancelConnection(); }
+      else if (event.key === "Escape" && !self.assetPicker.hidden) { event.preventDefault(); self.closeAssetPicker(); }
+      else if (event.key === "Escape" && !self.localAssetDialog.hidden) { event.preventDefault(); self.closeLocalAssetDialog(); }
+      else if (event.key === "Escape" && self.assetActionMenu.classList.contains("open")) { event.preventDefault(); self.closeAssetActionMenu(); }
       else if (event.key === "Escape") self.close(false);
     });
     this.listen(window, "pointermove", this.onConnectionMove.bind(this));
@@ -628,31 +895,6 @@
     this.render();
   };
 
-  Editor.prototype.addAssetDraft = function () {
-    const typeField = this.root.querySelector("[data-new-asset-type]");
-    const type = String(typeField && typeField.value || "role");
-    const typeLabel = { role: "角色", scene: "场景", tool: "道具" }[type] || "资产";
-    const name = window.prompt("请输入新" + typeLabel + "名称");
-    if (!name || !name.trim()) return;
-    if (this.assets.some(function (asset) { return asset.type === type && String(asset.name || "").trim() === name.trim(); })) {
-      this.setStatus("已存在同类型同名资产，请使用已有资产节点", "error");
-      return;
-    }
-    const describe = window.prompt("请输入" + typeLabel + "描述", "") || "";
-    const prompt = window.prompt("请输入图片生成提示词", describe) || "";
-    const point = this.centerPoint();
-    this.graph.nodes.push({
-      id: uid("asset-draft"), type: "upload", position: { x: point.x - 160, y: point.y - 200 },
-      data: {
-        image: "", originalImage: "", globalImage: "", assetId: null, assetName: name.trim(), assetType: type,
-        assetDescribe: describe, assetPrompt: prompt, globalDescribe: "", globalPrompt: "", revision: 1,
-        baseAssetRevision: 1, referenceEnabled: true, localSourceNodeId: "", overridden: true,
-        custom: false, draftAsset: true, uploadBusy: false, error: ""
-      }
-    });
-    this.commitHistory(); this.render();
-  };
-
   Editor.prototype.createAssetVariant = function (source) {
     if (!source || source.type !== "upload") return;
     const variant = this.createGeneratedNode({ x: source.position.x + 390, y: source.position.y + 30 }, {
@@ -663,7 +905,10 @@
       targetAssetType: source.data.assetType,
       targetAssetName: source.data.assetName,
       assetDescribe: source.data.assetDescribe,
-      draftAsset: !!source.data.draftAsset,
+      assetScope: source.data.assetScope || (source.data.assetId ? "global" : "canvas"),
+      assetKind: source.data.assetKind || (source.data.assetId ? "original" : "local"),
+      localAssetKey: source.data.localAssetKey || "",
+      draftAsset: false,
       isFinal: false
     });
     this.graph.nodes.push(variant);
@@ -674,8 +919,11 @@
   Editor.prototype.sourceNodeForAssetVersion = function (node) {
     if (!node) return null;
     if (node.type === "upload") return node;
-    return this.node(node.data.targetSourceNodeId) || this.graph.nodes.find(function (candidate) {
-      return candidate.type === "upload" && Number(candidate.data.assetId || 0) === Number(node.data.targetAssetId || 0);
+    const targetAssetId = Number(node.data.targetAssetId || 0);
+    return this.node(node.data.targetSourceNodeId) || (targetAssetId ? this.graph.nodes.find(function (candidate) {
+      return candidate.type === "upload" && Number(candidate.data.assetId || 0) === targetAssetId;
+    }) : null) || this.graph.nodes.find(function (candidate) {
+      return candidate.type === "upload" && node.data.localAssetKey && candidate.data.localAssetKey === node.data.localAssetKey;
     });
   };
 
@@ -689,19 +937,7 @@
     source.data.overridden = true;
     source.data.referenceEnabled = true;
     source.data.localSourceNodeId = variant.id;
-    const finalNode = this.finalNode();
-    if (finalNode) {
-      const assetId = this.assetIdForNode(variant);
-      this.graph.edges = this.graph.edges.filter(function (edge) {
-        if (edge.target !== finalNode.id) return true;
-        const edgeNode = this.node(edge.source);
-        return this.assetIdForNode(edgeNode) !== assetId || edge.source === variant.id;
-      }, this);
-      if (!this.graph.edges.some(function (edge) { return edge.source === variant.id && edge.target === finalNode.id; })) {
-        this.graph.edges.push({ id: uid("edge"), source: variant.id, target: finalNode.id, order: 0 });
-      }
-      this.normalizeFinalReferenceOrder();
-    }
+    this.connectAssetToFinal(variant);
     this.commitHistory(); this.render();
     this.setStatus("已设为当前分镜版本，保存画布后生效", "success");
   };
@@ -731,7 +967,7 @@
 
   Editor.prototype.publishAsset = async function (versionNode) {
     const source = this.sourceNodeForAssetVersion(versionNode);
-    if (!source || !source.data.assetType) return;
+    if (!source || !source.data.assetType || source.data.assetScope === "canvas") return;
     const image = this.imageForNode(versionNode);
     if (!image) { this.setStatus("请先上传或生成资产图片", "error"); return; }
     const isExisting = !!source.data.assetId;
@@ -906,15 +1142,18 @@
 
   Editor.prototype.renderUploadNode = function (article, node) {
     const data = node.data;
-    const typeLabel = { role: "角色", scene: "场景", tool: "道具" }[data.assetType] || (data.custom ? "本地图片" : "资产");
+    const baseTypeLabel = { role: "角色", scene: "场景", tool: "道具" }[data.assetType] || (data.custom ? "本地图片" : "资产");
+    const kindLabel = data.assetScope === "canvas" ? "画布资产" : data.assetKind === "derived" ? "衍生资产" : data.assetKind === "original" ? "原始资产" : "";
+    const typeLabel = kindLabel ? baseTypeLabel + " · " + kindLabel : baseTypeLabel;
     const editableAsset = !!data.assetType;
+    const canvasAsset = data.assetScope === "canvas";
     article.innerHTML = [
       '<header data-drag-handle><div><span>' + escapeHtml(typeLabel) + '</span><strong>' + escapeHtml(data.assetName || "图片") + '</strong></div><button type="button" data-node-delete title="删除节点">×</button></header>',
       '<div class="tf-sic-image ' + (data.image ? "" : "empty") + '">' + (data.image ? '<img src="' + escapeHtml(data.image) + '" alt="' + escapeHtml(data.assetName) + '">' : '<span>暂无图片<br>请上传本地图片</span>') + '</div>',
-      '<div class="tf-sic-node-state">' + (data.uploadBusy ? "正在上传…" : data.draftAsset ? "未发布资产草稿" : data.overridden && !data.custom ? "本分镜版本（不会影响其他分镜）" : data.custom ? "自定义图片" : "正式资产 · v" + Number(data.revision || 1)) + '</div>',
+      '<div class="tf-sic-node-state">' + (data.uploadBusy ? "正在上传…" : canvasAsset ? "仅保存在当前分镜画布" : data.overridden && !data.custom ? "本分镜版本（不会影响其他分镜）" : data.custom ? "自定义图片" : "正式资产 · v" + Number(data.revision || 1)) + '</div>',
       editableAsset ? '<div class="tf-sic-asset-fields"><label>描述<textarea data-asset-field="assetDescribe" placeholder="本分镜使用的资产描述">' + escapeHtml(data.assetDescribe || "") + '</textarea></label><label>图片提示词<textarea data-asset-field="assetPrompt" placeholder="用于生成资产候选版本">' + escapeHtml(data.assetPrompt || "") + '</textarea></label></div>' : "",
       data.error ? '<div class="tf-sic-node-error">' + escapeHtml(data.error) + '</div>' : "",
-      '<footer><label class="tf-sic-upload-button">' + (data.uploadBusy ? "上传中" : data.image ? "替换图片" : "上传图片") + '<input type="file" accept="image/png,image/jpeg" data-upload hidden ' + (data.uploadBusy ? "disabled" : "") + '></label>' + (editableAsset ? '<button type="button" data-asset-generate>生成版本</button>' : "") + (!data.draftAsset && !data.custom && data.overridden ? '<button type="button" data-restore>恢复全局</button>' : "") + (editableAsset && data.image ? '<button type="button" class="primary" data-asset-publish>发布全局</button>' : "") + '</footer>',
+      '<footer><label class="tf-sic-upload-button">' + (data.uploadBusy ? "上传中" : data.image ? "替换图片" : "上传图片") + '<input type="file" accept="image/png,image/jpeg" data-upload hidden ' + (data.uploadBusy ? "disabled" : "") + '></label>' + (editableAsset ? '<button type="button" data-asset-generate>生成版本</button>' : "") + (!canvasAsset && !data.custom && data.overridden ? '<button type="button" data-restore>恢复全局</button>' : "") + (!canvasAsset && editableAsset && data.image ? '<button type="button" class="primary" data-asset-publish>发布全局</button>' : "") + '</footer>',
       '<button type="button" class="tf-sic-port tf-sic-port-out" data-port-out title="拖动连接到生成节点"></button>'
     ].join("");
   };
@@ -938,7 +1177,7 @@
       '<div class="tf-sic-mention-menu" data-mention-menu></div>',
       '<div class="tf-sic-generate-controls"><select data-field="model">' + options(modelValues, data.model, modelLabel) + '</select><select data-field="ratio">' + options(uniqueOptions(data.ratio, ["16:9", "9:16", "1:1", "4:3", "3:4"]), data.ratio) + '</select><select data-field="quality">' + options(uniqueOptions(data.quality, ["1K", "2K", "4K"]), data.quality) + '</select></div>',
       data.error ? '<div class="tf-sic-node-error">' + escapeHtml(data.error) + '</div>' : "",
-      '<footer><button type="button" class="primary" data-generate ' + (data.busy || !data.model ? "disabled" : "") + '>' + (data.busy ? "生成中…" : "生成图片") + '</button>' + (isAssetVariant && data.generatedImage ? '<button type="button" data-use-local>设为本分镜</button><button type="button" data-asset-publish>发布全局</button>' : "") + '<span>' + incoming.length + ' 张参考图</span></footer>',
+      '<footer><button type="button" class="primary" data-generate ' + (data.busy || !data.model ? "disabled" : "") + '>' + (data.busy ? "生成中…" : "生成图片") + '</button>' + (isAssetVariant && data.generatedImage ? '<button type="button" data-use-local>设为本分镜</button>' + (data.assetScope === "canvas" ? "" : '<button type="button" data-asset-publish>发布全局</button>') : "") + '<span>' + incoming.length + ' 张参考图</span></footer>',
       '<button type="button" class="tf-sic-port tf-sic-port-in" data-port-in title="接收图片连接"></button>',
       '<button type="button" class="tf-sic-port tf-sic-port-out" data-port-out title="将生成结果连接到其他生成节点"></button>'
     ].join("");
@@ -1100,6 +1339,7 @@
         node.data.localSourceNodeId = node.id;
       }
       if (node.data.custom) node.data.assetName = file.name || "本地图片";
+      if (node.data.assetScope === "canvas") this.connectAssetToFinal(node);
       this.commitHistory();
     } catch (error) {
       node.data.error = error && error.message ? error.message : String(error);
@@ -1158,13 +1398,11 @@
     if (this.graph.edges.some(function (edge) { return edge.source === sourceId && edge.target === targetId; })) { this.setStatus("这两个节点已经连接", "error"); return false; }
     if (this.hasPath(targetId, sourceId)) { this.setStatus("不能创建循环连接", "error"); return false; }
     if (target.data.isFinal) {
-      const assetId = this.assetIdForNode(source);
-      if (assetId) {
-        this.graph.edges = this.graph.edges.filter(function (edge) {
-          if (edge.target !== targetId) return true;
-          return this.assetIdForNode(this.node(edge.source)) !== assetId;
-        }, this);
-      }
+      const identity = this.assetIdentityForNode(source);
+      this.graph.edges = this.graph.edges.filter(function (edge) {
+        if (edge.target !== targetId) return true;
+        return this.assetIdentityForNode(this.node(edge.source)) !== identity;
+      }, this);
     }
     const order = this.incomingEdges(targetId).reduce(function (max, edge) { return Math.max(max, Number(edge.order || 0)); }, -1) + 1;
     this.graph.edges.push({ id: uid("edge"), source: sourceId, target: targetId, order: order });
@@ -1448,7 +1686,10 @@
   Editor.prototype.assetSelections = function () {
     const finalNode = this.finalNode();
     const selectedNodes = finalNode ? this.incomingEdges(finalNode.id).map(function (edge) { return this.node(edge.source); }, this).filter(Boolean) : [];
-    return this.assets.map(function (asset) {
+    return this.assets.filter(function (asset) {
+      const assetId = Number(asset.id);
+      return this.initialAssetIds.has(assetId) || this.graph.nodes.some(function (node) { return this.assetIdForNode(node) === assetId; }, this);
+    }, this).map(function (asset) {
       const assetId = Number(asset.id);
       const source = this.graph.nodes.find(function (node) { return node.type === "upload" && Number(node.data.assetId || 0) === assetId; });
       const selected = selectedNodes.find(function (node) { return this.assetIdForNode(node) === assetId; }, this);
@@ -1477,8 +1718,6 @@
     try {
       const graph = this.persistedGraph();
       const prompt = this.compiledPrompt(finalNode);
-      const unpublished = this.incomingEdges(finalNode.id).map(function (edge) { return this.node(edge.source); }, this).find(function (node) { return node && node.data.draftAsset && !Number(node.data.assetId); });
-      if (unpublished) throw new Error("未发布的资产草稿不能用于最终分镜，请先发布为正式资产");
       const saved = apiData(await this.config.post("/api/storyboardImport/canvas/save", {
         projectId: this.projectId,
         scriptId: this.scriptId,
@@ -1515,6 +1754,9 @@
     if (this.connecting) this.cancelConnection();
     if (this.dragging) this.finishNodeDrag(this.dragging.nodeId);
     if (!force && this.dirty && !window.confirm("画布有未保存的修改，确认关闭吗？")) return false;
+    this.closeAssetActionMenu();
+    this.closeAssetPicker();
+    this.closeLocalAssetDialog();
     this.stopAutoPan();
     clearTimeout(this.historyTimer);
     this.listeners.splice(0).forEach(function (dispose) { dispose(); });

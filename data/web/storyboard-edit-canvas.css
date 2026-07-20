@@ -7,6 +7,12 @@ body.tf-sic-open { overflow: hidden !important; }
 .tf-sic-title span { color: #7b8799; white-space: nowrap; }
 .tf-sic-toolbar, .tf-sic-actions { display: flex; align-items: center; gap: 7px; }
 .tf-sic-toolbar i { width: 1px; height: 24px; background: #dce2eb; margin: 0 3px; }
+.tf-sic-asset-command { position: relative; }
+.tf-sic-asset-action-menu { position: absolute; z-index: 30; top: calc(100% + 8px); left: 0; width: 248px; display: none; padding: 6px; border: 1px solid #d3dce8; border-radius: 11px; background: #fff; box-shadow: 0 14px 36px rgba(29,45,70,.2); }
+.tf-sic-asset-action-menu.open { display: grid; gap: 4px; }
+.tf-sic-asset-action-menu button { height: auto; display: grid; gap: 2px; padding: 9px 10px; text-align: left; }
+.tf-sic-asset-action-menu b { font-size: 13px; }
+.tf-sic-asset-action-menu span { color: #7c889b; font-size: 11px; }
 .tf-sic-toolbar button, .tf-sic-toolbar select, .tf-sic-actions button, .tf-sic-node button, .tf-sic-upload-button { min-height: 32px; padding: 5px 11px; border: 1px solid #d3dbe7; border-radius: 8px; color: #354158; background: #fff; cursor: pointer; font: inherit; transition: border-color .16s, color .16s, background .16s, transform .16s; }
 .tf-sic-toolbar button:hover, .tf-sic-actions button:hover, .tf-sic-node button:hover, .tf-sic-upload-button:hover { color: #1766d2; border-color: #7eb1f5; background: #f2f7ff; }
 .tf-sic-toolbar button:disabled, .tf-sic-actions button:disabled, .tf-sic-node button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
@@ -91,9 +97,52 @@ body.tf-sic-open { overflow: hidden !important; }
 .tf-sic-generate-controls { display: grid; grid-template-columns: 1fr 86px 78px; gap: 7px; padding: 0 12px 10px; }
 .tf-sic-generate-controls select { width: 100%; height: 34px; border: 1px solid #d4dce7; border-radius: 7px; color: #354158; background: #fff; }
 .tf-sic-help { position: absolute; z-index: 4; left: 18px; bottom: 16px; padding: 7px 11px; border: 1px solid rgba(202,211,223,.85); border-radius: 8px; color: #68778e; background: rgba(255,255,255,.88); box-shadow: 0 4px 15px rgba(41,57,79,.08); pointer-events: none; }
+.tf-sic-modal[hidden] { display: none !important; }
+.tf-sic-modal { position: fixed; z-index: 2147483600; inset: 0; display: grid; place-items: center; padding: 28px; background: rgba(16,27,45,.5); backdrop-filter: blur(2px); }
+.tf-sic-dialog { width: min(720px, calc(100vw - 56px)); max-height: min(780px, calc(100vh - 56px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid #d4dce7; border-radius: 15px; background: #fff; box-shadow: 0 24px 70px rgba(18,31,52,.3); user-select: text; }
+.tf-sic-dialog > header, .tf-sic-dialog > footer { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 14px 16px; }
+.tf-sic-dialog > header { justify-content: space-between; border-bottom: 1px solid #e4e9f0; }
+.tf-sic-dialog > header > div { display: flex; flex-direction: column; }
+.tf-sic-dialog > header strong { font-size: 16px; }
+.tf-sic-dialog > header span, .tf-sic-dialog > footer > span { color: #7c889b; font-size: 12px; }
+.tf-sic-dialog > header button, .tf-sic-dialog > footer button { min-height: 34px; padding: 6px 13px; border: 1px solid #d3dbe7; border-radius: 8px; color: #354158; background: #fff; cursor: pointer; font: inherit; }
+.tf-sic-dialog > header button { width: 32px; min-height: 32px; padding: 0; font-size: 20px; }
+.tf-sic-dialog > footer { justify-content: flex-end; border-top: 1px solid #e4e9f0; }
+.tf-sic-dialog > footer > span { margin-right: auto; }
+.tf-sic-dialog button.primary { color: #fff; border-color: #176fe5; background: #176fe5; }
+.tf-sic-dialog button:disabled { opacity: .45; cursor: not-allowed; }
+.tf-sic-dialog-search { padding: 12px 16px; border-bottom: 1px solid #edf0f5; }
+.tf-sic-dialog-search input, .tf-sic-local-form input, .tf-sic-local-form textarea { width: 100%; padding: 9px 10px; border: 1px solid #d3dce8; border-radius: 8px; color: #27344a; background: #fff; font: inherit; outline: none; }
+.tf-sic-dialog-search input:focus, .tf-sic-local-form input:focus, .tf-sic-local-form textarea:focus { border-color: #5599ef; box-shadow: 0 0 0 3px rgba(61,139,235,.12); }
+.tf-sic-asset-picker-list { min-height: 260px; padding: 4px 16px 16px; overflow-y: auto; }
+.tf-sic-picker-section h3 { display: flex; align-items: center; gap: 7px; margin: 13px 0 8px; color: #39465b; font-size: 13px; }
+.tf-sic-picker-section h3 span { min-width: 22px; padding: 1px 6px; border-radius: 999px; color: #66758c; background: #eef2f7; font-size: 11px; text-align: center; }
+.tf-sic-picker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.tf-sic-picker-card { position: relative; min-width: 0; display: grid; grid-template-columns: 22px 76px minmax(0, 1fr); align-items: center; gap: 9px; padding: 8px; border: 1px solid #d9e1eb; border-radius: 10px; background: #fff; cursor: pointer; }
+.tf-sic-picker-card:hover { border-color: #78aef1; background: #f7fbff; }
+.tf-sic-picker-card.is-disabled { opacity: .58; cursor: not-allowed; }
+.tf-sic-picker-card > img { width: 76px; height: 66px; object-fit: contain; border-radius: 7px; background: #eef2f6; }
+.tf-sic-picker-card-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.tf-sic-picker-card-body > b, .tf-sic-picker-card-body > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-sic-picker-card-body > small { color: #7d899b; }
+.tf-sic-picker-card-body > em { width: max-content; padding: 1px 6px; border-radius: 999px; color: #236ab9; background: #eaf4ff; font-size: 10px; font-style: normal; }
+.tf-sic-picker-card-body > em.derived { color: #8a5511; background: #fff2dc; }
+.tf-sic-picker-card > i { position: absolute; top: 7px; right: 7px; padding: 2px 5px; border-radius: 5px; color: #68778e; background: #eef2f6; font-size: 10px; font-style: normal; }
+.tf-sic-picker-empty { min-height: 250px; display: grid; place-items: center; color: #8a96a8; }
+.tf-sic-local-dialog { width: min(560px, calc(100vw - 56px)); }
+.tf-sic-local-form { display: grid; gap: 13px; padding: 16px; overflow-y: auto; }
+.tf-sic-local-form label { display: grid; gap: 6px; color: #4e5c72; font-size: 13px; }
+.tf-sic-local-form label b { margin-left: 3px; color: #d6404b; }
+.tf-sic-local-form textarea { resize: vertical; }
+.tf-sic-form-error { min-height: 20px; color: #c43743; font-size: 12px; }
 .tf-sic-load-error .tf-sic-stage::after { content: "画布加载失败，请关闭后重试"; position: absolute; inset: 0; display: grid; place-items: center; color: #bd3540; background: rgba(248,250,253,.88); font-size: 18px; }
 @media (max-width: 1180px) {
   .tf-sic-header { grid-template-columns: auto 1fr auto; }
   .tf-sic-title span, .tf-sic-actions > span { display: none; }
   .tf-sic-toolbar { overflow-x: auto; }
+}
+@media (max-width: 760px) {
+  .tf-sic-picker-grid { grid-template-columns: 1fr; }
+  .tf-sic-modal { padding: 14px; }
+  .tf-sic-dialog { width: calc(100vw - 28px); max-height: calc(100vh - 28px); }
 }
